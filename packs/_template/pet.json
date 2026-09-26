@@ -1,0 +1,48 @@
+{
+  "name": "你的角色名",
+  "scale": 1.0,
+  "canvas": [512, 512],
+  "anchor": [256, 512],
+  "actions": {
+    "idle": {
+      "frames": 22,
+      "fps": 10.0,
+      "loop": "pingpong"
+    },
+    "walk": {
+      "frames": 28,
+      "fps": 12.5,
+      "loop": "cycle",
+      "cycle_frames": 28,
+      "stride_px": 154.0
+    },
+    "drag": { "frames": 16, "fps": 12.0, "loop": "cycle" },
+    "fall": { "frames": 14, "fps": 25.0, "loop": "once" },
+    "land": { "frames": 16, "fps": 25.0, "loop": "once" },
+    "pat":  { "frames": 18, "fps": 12.0, "loop": "pingpong" }
+  },
+  "behaviour": {
+    "idle_duration": [3, 8],
+    "walk_duration": [4.0, 8.0],
+    "walk_weight": 0.6,
+    "turn_chance": 0.35,
+    "turn_ease_tau": 0.35,
+    "gravity": 1800,
+    "screen_margin": 0,
+    "drag_tilt_max": 45.0,
+    "tilt_omega0": 5.0,
+    "tilt_zeta": 0.8,
+    "tilt_drive": 14000.0,
+    "tilt_vref": 1200.0,
+    "tilt_v_tau": 0.05,
+    "tilt_force_tau": 0.12,
+    "tilt_drive_exp": 3.0,
+    "mood_max": 100.0,
+    "mood_per_click": 8.0,
+    "mood_decay": 1.2,
+    "seek_cursor_mood": 65.0,
+    "seek_chance": 0.5,
+    "arrive_eps": 12.0,
+    "pat_duration": 1.2
+  }
+}

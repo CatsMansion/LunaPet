@@ -1,0 +1,28 @@
+# ⭐ 角色素材不随仓库发布 —— 帧序列自己放
+packs/*/action/
+packs/*/presets/
+!packs/_template/pet.json
+
+# 构建产物
+build/
+dist*/
+*.toc
+
+# 模型权重（几十 MB 起，按需自备）
+models/
+*.onnx
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

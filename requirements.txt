@@ -1,0 +1,13 @@
+# LunaPet 依赖
+#
+# 引擎本体只要这两个：
+#   PySide6   窗口 / 绘制 / 鼠标 / 托盘
+#   numpy     帧数据与倾斜计算
+#
+# 装：pip install -r requirements.txt
+
+PySide6>=6.6.0
+numpy>=1.24.0
+
+# 打包 exe 才需要（可选）： pip install pyinstaller
+# pyinstaller>=6.0
