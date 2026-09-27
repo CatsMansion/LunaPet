@@ -35,9 +35,13 @@
 或者手动：
 
 ```bat
-cd /d 自研引擎
-"C:\Users\mercy\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m PyInstaller --noconfirm --clean LunaPet.spec
+cd /d <仓库根目录>
+python -m PyInstaller --noconfirm --clean LunaPet.spec
 ```
+
+> ⚠️ 必须用**装了 PySide6 的那个解释器**。如果 PATH 里的 `python` 不是，
+> 就在命令里写全路径，例如：
+> `"C:\Python312\python.exe" -m PyInstaller --noconfirm --clean LunaPet.spec`
 
 > ⚠️ 重打前如果 `dist\LunaPet` 已存在，PyInstaller 会先删掉它。
 > 如果被占用（比如宠物还开着），先退出宠物再打。

@@ -79,6 +79,12 @@ class Behaviour:
     tilt_drive_exp: float = 1.6        # ⭐ 力的指数曲线：>1 → 慢移几乎不倾、快甩才猛涨
     screen_margin: int = 0
     walk_speed: float = 1.0        # 走速倍率（手感微调用）
+    # ⭐⭐ 睡眠（2026-09-26）：连续待机多久睡着 → 睡着 → 叫醒 → 伸懒腰
+    sleep_after: Tuple[float, float] = (40.0, 90.0)   # 连续无互动多久入睡（秒，随机区间）
+    sleep_mood_decay_scale: float = 0.2               # 睡着时好感度衰减倍率（睡得香，掉得慢）
+    wake_radius: float = 120.0                        # 光标靠近多少 px 会把她吵醒
+    stretch_chance: float = 0.6                       # 醒来后做伸懒腰的概率
+    sleep_wakeup_need: float = 1.0                    # 摇几下才醒（拖拽时）——预留
 
 
 @dataclass
@@ -130,6 +136,11 @@ def load_pack(folder: str) -> PetPack:
         tilt_drive_exp=float(b.get("tilt_drive_exp", 1.6)),
         screen_margin=int(b.get("screen_margin", 0)),
         walk_speed=float(b.get("walk_speed", 1.0)),
+        sleep_after=tuple(b.get("sleep_after", (40.0, 90.0))),
+        sleep_mood_decay_scale=float(b.get("sleep_mood_decay_scale", 0.2)),
+        wake_radius=float(b.get("wake_radius", 120.0)),
+        stretch_chance=float(b.get("stretch_chance", 0.6)),
+        sleep_wakeup_need=float(b.get("sleep_wakeup_need", 1.0)),
     )
     return PetPack(name=d.get("name", os.path.basename(folder)), root=folder,
                    canvas=tuple(d.get("canvas", (512, 512))),
@@ -237,6 +248,12 @@ class Pet:
         self._pat_t = 0.0              # 被摸剩余时间
         self._cursor_x = None          # 最近一次光标位置（由 UI 喂进来）
         self._hearts = []              # ⭐ 供 UI 画的爱心（(t秒, x偏移)）            # ⭐ 当前走路速度（平滑跟随目标，掉头时过零）
+        # ⭐⭐ 睡眠状态（2026-09-26）
+        self.asleep = False            # 正在睡（sleep_in 之后 / sleep_loop 中）
+        self._sleep_t = 0.0            # 连续"清醒待机"累计秒
+        self._sleep_need = random.uniform(*self.behaviour.sleep_after)   # 本次入睡阈值
+        self._wake_stage = 0           # 0=没在起 1=正在放 sleep_out 2=正在放 stretch
+        self.last_wake_reason = ""
         self.play("idle")
 
     # ---------- 动作 ----------
@@ -249,16 +266,86 @@ class Pet:
         self.anim = Anim(act)
         self.state = name
 
+    # ---------- ⭐⭐ 睡眠 / 叫醒 / 伸懒腰 ----------
+    def _has(self, name: str) -> bool:
+        return name in self.pack.actions
+
+    def fall_asleep(self):
+        """入睡：sleep_in（once）→ sleep_loop（循环）"""
+        if self.asleep or self.dragging:
+            return False
+        self.asleep = True
+        self.goal = None
+        self._sleep_t = 0.0
+        self._wake_stage = 0
+        if self._has("sleep_in"):
+            self.play("sleep_in")            # 播完由 step() 接到 sleep_loop
+        else:
+            self.play("sleep_loop" if self._has("sleep_loop") else "idle")
+        return True
+
+    def wake(self, reason: str = "") -> bool:
+        """叫醒：sleep_out（once）→ stretch（once，可缺省）→ idle
+
+        ⭐ 三段衔接是关键：
+           sleep_out 播完**不能直接回 idle**（那会有"睡姿→站姿"的硬切），
+           而是接一个舒展动作（伸懒腰），再回 idle。
+           ⛔ stretch 素材缺失时优雅降级：有 land_settle 就用它当"舒展"，
+             都没有就先 walk 都不接，直接 idle（不会崩）。
+        """
+        if self._wake_stage == 0 and not self.asleep and \
+                self.state not in ("sleep_in", "sleep_loop"):
+            return False
+        self.asleep = False
+        self._sleep_t = 0.0
+        self.last_wake_reason = reason
+        self.goal = None
+        self._wake_stage = 0
+        self._sleep_need = random.uniform(*self.behaviour.sleep_after)
+        if self._has("sleep_out"):
+            self._wake_stage = 1
+            self.play("sleep_out")
+        else:
+            self._wake_stage = 0
+            self.play("idle")
+            self.state_timer = random.uniform(*self.behaviour.idle_duration)
+        return True
+
+    def _after_sleep_out(self):
+        """sleep_out 播完 → 决定要不要伸懒腰"""
+        b = self.behaviour
+        if self._has("stretch") and random.random() < b.stretch_chance:
+            self._wake_stage = 2
+            self.play("stretch")
+            return
+        if not self._has("stretch") and self._has("land_settle"):
+            # ⭐ 兜底：还没有真正的伸懒腰素材时，用"落地收尾"当舒展动作
+            self._wake_stage = 2
+            self.play("land_settle")
+            return
+        self._wake_stage = 0
+        self.play("idle")
+        self.state_timer = random.uniform(*b.idle_duration)
+
+    def _wake_from_cursor(self):
+        """光标靠近就把她吵醒（睡着时才会触发）"""
+        if not self.asleep or self._cursor_x is None:
+            return
+        if abs(self._cursor_x - self.body.x) <= self.behaviour.wake_radius:
+            self.wake("cursor")
+
     # ---------- ⭐ v0.2：互动 ----------
     def on_click(self):
-        """被点一下 —— 摸摸"""
+        """被点一下 —— 睡着时=叫醒（照样加好感、照样冒爱心）"""
         b = self.behaviour
         self.mood = min(b.mood_max, self.mood + b.mood_per_click)
-        self._pat_t = b.pat_duration
-        # 冒个爱心（UI 读 self._hearts 来画）
         self._hearts.append([0.0])
         if len(self._hearts) > 6:
             self._hearts.pop(0)
+        if self.asleep or self.state in ("sleep_in", "sleep_loop"):
+            self.wake("click")          # ⭐ 睡着时点一下 = 叫醒，不播 pat
+            return
+        self._pat_t = b.pat_duration
         if "pat" in self.pack.actions:
             self.play("pat")
         self.goal = None               # 被摸时先不走动，专心享受
@@ -321,17 +408,33 @@ class Pet:
             self.body.vy += b.gravity * dt
             self.body.y += self.body.vy * dt
 
-        # ⭐ v0.2：好感度自然衰减 + 爱心飘动计时
-        self.mood = max(0.0, self.mood - b.mood_decay * dt)
+        # ⭐⭐ v0.2：好感度自然衰减 + 爱心飘动计时（睡着时掉得慢 → "睡得香"）
+        self.mood = max(0.0, self.mood - b.mood_decay * dt
+                        * (b.sleep_mood_decay_scale if self.asleep else 1.0))
         for h in self._hearts:
             h[0] += dt
         self._hearts = [h for h in self._hearts if h[0] < 1.1]
+
+        # ⭐⭐ 睡眠：连续"清醒待机"累计到阈值 → 睡着；光标靠近 → 叫醒
+        if not self.dragging:
+            if self._wake_stage > 0:
+                self._sleep_t = 0.0                     # 正在起床，别记入睡眠计时
+            elif self.asleep or self.state in ("sleep_in", "sleep_loop"):
+                self._sleep_t = 0.0
+            elif self.state in ("idle", "walk"):
+                self._sleep_t += dt
+                if self._sleep_t >= self._sleep_need:
+                    self.fall_asleep()
+            else:
+                self._sleep_t = 0.0                     # 被摸/下落/落地 → 重置
+            self._wake_from_cursor()
 
         # ⭐ v0.2：目标导向 —— 有目标就朝它走，到了就停
         #  ⭐ 只在【脚沾地 + 不在下落/落地中】才允许目标驱动走路
         #    ⛔ 否则松手后会立刻从 fall 切回 walk（"拿起来触发不了 fall"的根因）
         if (self.goal in ("goto", "seek") and self._pat_t <= 0
-                and self.body.on_ground and self.state not in ("fall", "land")):
+                and self.body.on_ground and self.state not in ("fall", "land")
+                and not self.asleep and self._wake_stage == 0):
             if self.goal == "seek" and self._cursor_x is not None:
                 self.goal_x = self._cursor_x
             if self._goal_reached():
@@ -409,9 +512,19 @@ class Pet:
         if self.anim:
             self.anim.advance(dt)
             if self.anim.finished:
-                # 一次性动作播完 → 回 idle / 落地
+                # 一次性动作播完 → 按状态决定接什么
                 if self.state == "fall":
                     self.play("land")
+                elif self.state == "sleep_in":
+                    # ⭐ 睡下 → 接睡眠循环
+                    self.play("sleep_loop" if self._has("sleep_loop") else "idle")
+                elif self.state == "sleep_out":
+                    # ⭐⭐ 起床后接"伸懒腰"（没有素材就降级）
+                    self._after_sleep_out()
+                elif self.state in ("stretch", "land_settle") and self._wake_stage == 2:
+                    self._wake_stage = 0
+                    self.play("idle")
+                    self.state_timer = random.uniform(*self.behaviour.idle_duration)
                 else:
                     self.state_timer = random.uniform(*self.behaviour.idle_duration)
                     self.play("idle")
@@ -430,6 +543,11 @@ class Pet:
         #   （⛔ 不清的话，松手后目标还在，update() 会立刻 play("walk") 把 fall 顶掉）
         self.goal = None
         self.dragging = True
+        # ⭐ 被拎起来 → 睡眠状态与计时全部作废
+        self.asleep = False
+        self._sleep_t = 0.0
+        self._wake_stage = 0
+        self._sleep_need = random.uniform(*self.behaviour.sleep_after)
         self.body.vx = 0.0
         self.body.vy = 0.0
         self._drag_hist = []

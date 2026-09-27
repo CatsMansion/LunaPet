@@ -170,6 +170,19 @@ class TunerWindow(QWidget):
         b_copy.clicked.connect(self.copy_frame_path)
         h3.addWidget(self.frame_lbl, 1); h3.addWidget(b_copy)
         va.addLayout(h3)
+
+        # ⭐⭐ 睡眠演示：不用等 40~90 秒
+        h4 = QHBoxLayout()
+        b_sleep = QPushButton("😴 让她睡")
+        b_sleep.setToolTip("立刻进入入睡序列：sleep_in → sleep_loop")
+        b_wake = QPushButton("⏰ 叫醒")
+        b_wake.setToolTip("立刻叫醒：sleep_out → 伸懒腰（stretch，缺省用 land_settle）→ idle")
+        b_sleep.clicked.connect(self.do_sleep)
+        b_wake.clicked.connect(self.do_wake)
+        self.sleep_lbl = QLabel("睡眠：—")
+        self.sleep_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        h4.addWidget(b_sleep); h4.addWidget(b_wake); h4.addWidget(self.sleep_lbl, 1)
+        va.addLayout(h4)
         root.addWidget(ga)
         self.refresh_actions()
 
@@ -333,8 +346,36 @@ class TunerWindow(QWidget):
         self.pw.update()
         self.status.setText("⟲ 已重置到屏幕底部中间")
 
+    def do_sleep(self):
+        """⭐ 立刻让她睡（不用等 40~90 秒）"""
+        pet = self.pw.pet
+        if pet.fall_asleep():
+            self.status.setText("😴 入睡中：sleep_in → sleep_loop")
+        else:
+            self.status.setText("⚠ 她已经在睡了（或被拎着）")
+
+    def do_wake(self):
+        """⭐ 立刻叫醒：sleep_out → 伸懒腰 → idle"""
+        pet = self.pw.pet
+        if pet.wake("console"):
+            nxt = "stretch" if "stretch" in pet.pack.actions else "land_settle"
+            self.status.setText(f"⏰ 叫醒：sleep_out → {nxt} → idle")
+        else:
+            self.status.setText("⚠ 她没在睡")
+
     def _update_frame_label(self):
         p = self.pw.pet.current_frame_path()
+        pet = self.pw.pet
+        if hasattr(self, "sleep_lbl"):
+            if pet.asleep:
+                txt = ("睡眠：😴 睡着（sleep_loop）" if pet.state == "sleep_loop"
+                       else f"睡眠：😴 入睡中（{pet.state}）")
+            elif pet._wake_stage > 0:
+                txt = f"睡眠：⏰ 起床中（{pet.state}）"
+            else:
+                left = max(0.0, pet._sleep_need - pet._sleep_t)
+                txt = f"睡眠：清醒（再过 {left:.0f}s 入睡）"
+            self.sleep_lbl.setText(txt)
         if not p:
             self.frame_lbl.setText("当前帧：—"); return
         self.frame_lbl.setText(f"当前帧：{os.path.basename(p)}　（{os.path.basename(os.path.dirname(p))}/）")
