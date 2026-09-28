@@ -663,7 +663,19 @@ class Pet:
         self._tilt_vx = 0.0
         self._tilt_vx_f = 0.0
         self._tilt_ax_f = 0.0
+        # ⭐⭐ 2026-09-28 修：切换动作前先记下【旧动作】的贴附点。
+        #   渲染恒等式 W = B - anchor（ui.py `_apply_pos`），而"拎起来"这个动作
+        #   有自己的 anchor（抓取点，在身体上部），与待机/走路的"脚底"差 300+px。
+        #   ⛔ 若只 play 不补偿：anchor 一变，窗口位置立刻按新 anchor 重算 →
+        #      按下鼠标的瞬间角色"跳"一下（Ronny 实机反馈「drag 会位移」）。
+        #   ✅ 补偿：让 body 同步平移 (a_new - a_old)，使 W 保持不变 → 切换无感。
+        _prev = self.state
         self.play("drag")
+        a_old = self.pack.anchor_of(_prev)
+        a_new = self.pack.anchor_of("drag")
+        self.body.x += a_new[0] - a_old[0]
+        self.body.y += a_new[1] - a_old[1]
+        self._tilt_x = self.body.x      # ⭐ 补偿后重设，避免第一帧算出虚假鼠标速度
 
     def move_drag(self, mx: float, my: float):
         self.body.x, self.body.y = mx, my
@@ -672,7 +684,14 @@ class Pet:
     def end_drag(self):
         self.dragging = False
         self.body.on_ground = False
+        # ⭐⭐ 2026-09-28 修：与 begin_drag 对称 —— 从"抓取点"锚点切回"脚底"锚点时，
+        #   同步平移 body，保证窗口位置不变（否则松手瞬间角色会瞬移 300+px）。
+        _prev = self.state
         self.play("fall")
+        a_old = self.pack.anchor_of(_prev)
+        a_new = self.pack.anchor_of("fall")
+        self.body.x += a_new[0] - a_old[0]
+        self.body.y += a_new[1] - a_old[1]
 
     def current_frame_path(self):
         if not self.anim:
