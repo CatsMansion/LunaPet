@@ -17,7 +17,14 @@ from ui import PetWindow
 from core import load_pack
 
 
+n_ok = 0
+n_all = 0          # ⭐ 2026-09-28：分母不再写死。原来写死 /10 而实际有 11 项，
+                   #    结果「11 / 10 项」+ exit(1) —— 全过反而报失败。
+
+
 def check(label, cond, detail=""):
+    global n_all
+    n_all += 1
     print(f"  {'✅' if cond else '⛔'} {label}" + (f"   {detail}" if detail else ""))
     return bool(cond)
 
@@ -41,7 +48,11 @@ print("=== ⭐ 拖动 ≠ 点击（拉远再松手应算拖拽，不该加分）
 m2 = w.pet.mood
 w.timer.stop()                       # 停掉主循环，避免状态机继续跑影响判定
 QTest.mousePress(w, Qt.LeftButton, Qt.NoModifier, QPoint(256, 420))
-w._moved = 80.0                      # 模拟"拖了 80px"
+# ⛔ 2026-09-28 更新：原来这里直接 `w._moved = 80.0` 戳私有变量 —— 那是【旧实现】的判定依据。
+#   今天的 ui.py 改成「真的移动超阈值才 begin_drag」（修"睡着点一下被瞬移"那个 bug），
+#   松手时看的是 `_drag_started`（在 mouseMoveEvent 里置位），不再回看 _moved。
+#   所以必须【真的发一个 move 事件】—— 这本来也正是本文件开头写的"合成真实鼠标事件，不是调函数"。
+QTest.mouseMove(w, QPoint(336, 420))     # 真的移动 80px
 QTest.mouseRelease(w, Qt.LeftButton, Qt.NoModifier, QPoint(336, 420))
 n_ok += check("拖完不加好感度", w.pet.mood <= m2 + 0.01, f"{m2:.0f} → {w.pet.mood:.0f}")
 n_ok += check("进入下落（说明当成拖拽处理了）", w.pet.state == "fall", f"state={w.pet.state}")
@@ -78,5 +89,5 @@ for _ in range(150):
     w.pet.step(1 / 60, (-256, 256, -512, 0))
 n_ok += check("落地后恢复到常态", w.pet.state in ("land", "idle", "walk"), f"state={w.pet.state}")
 
-print(f"\n{'='*54}\n  通过 {n_ok} / 10 项")
-sys.exit(0 if n_ok == 10 else 1)
+print(f"\n{'='*54}\n  通过 {n_ok} / {n_all} 项")
+sys.exit(0 if n_ok == n_all else 1)

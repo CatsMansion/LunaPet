@@ -28,6 +28,16 @@ class Action:
     cycle_frames: Optional[int] = None   # ⭐ 一个完整循环跨多少帧（走路的"两步"就填这里）
     stride_px: Optional[float] = None    # ⭐ 一个循环前进多少像素 → 引擎自己推每帧位移
     mirrorable: bool = False             # 能否由本动作镜像出反向（左走）
+    # ⭐⭐ 2026-09-27：逐动作画布（支持横画幅）
+    #    趴姿是横躺的，用 2:3 竖幅会把她挤成一小团 → 睡眠三段改走横画幅。
+    #    None = 回落顶层 canvas/anchor（现有 9 个动作不受影响，向后兼容）。
+    canvas: Optional[Tuple[int, int]] = None   # 本动作的画布尺寸
+    anchor: Optional[Tuple[int, int]] = None   # 本动作的贴地参考点在画布中的位置
+    # ⭐⭐ 2026-09-28：起始帧（once 动作跳过素材开头的静止预备段）
+    #    实测依据（_析_转身diff.py）：turn_in 18 帧里 #0-#8 相邻差异率 0.02~2.4%（基本静止），
+    #    #9 起才真正转身（11%→22%）。整段播 = 决定走路后原地站 0.72s 才动身，观感迟钝。
+    #    pet.json 里给 turn_in 写 "start": 9 → 只播转身段。
+    start: int = 0
 
     @property
     def frame_dt(self) -> float:
@@ -43,10 +53,11 @@ class Action:
     def sequence(self) -> List[int]:
         """返回播放顺序的帧号列表（含 loop 展开）"""
         n = self.frames
+        s = min(self.start, max(0, n - 1))      # ⭐ once 动作的起始帧（跳过静止预备段）
         if self.loop == "cycle":
             return list(range(n))
         if self.loop == "once" or self.loop == "hold":
-            return list(range(n))
+            return list(range(s, n))
         if self.loop == "pingpong":
             return list(range(n)) + list(range(n - 2, 0, -1))   # 不去重首尾
         return list(range(n))
@@ -100,6 +111,24 @@ class PetPack:
     def frame_path(self, action: str, idx: int) -> str:
         return os.path.join(self.root, "action", f"{action}_{idx}.png")
 
+    def canvas_of(self, action: str) -> Tuple[int, int]:
+        """⭐ 取某动作的画布尺寸：动作自己声明优先，否则回落顶层"""
+        act = self.actions.get(action)
+        if act is not None and act.canvas is not None:
+            return act.canvas
+        return self.canvas
+
+    def anchor_of(self, action: str) -> Tuple[int, int]:
+        """⭐ 取某动作的贴地参考点：动作自己声明优先，否则回落顶层。
+
+        ⚠️ 语义：从"脚底中点"扩展为"贴地参考点" ——
+           站姿 = 脚底中点；侧躺 = 身体下缘中点。都是"贴着地面那个点"。
+        """
+        act = self.actions.get(action)
+        if act is not None and act.anchor is not None:
+            return act.anchor
+        return self.anchor
+
 
 def load_pack(folder: str) -> PetPack:
     with open(os.path.join(folder, "pet.json"), "r", encoding="utf-8") as f:
@@ -110,7 +139,11 @@ def load_pack(folder: str) -> PetPack:
                          loop=v.get("loop", "cycle"),
                          cycle_frames=v.get("cycle_frames"),
                          stride_px=v.get("stride_px"),
-                         mirrorable=bool(v.get("mirrorable", False)))
+                         mirrorable=bool(v.get("mirrorable", False)),
+                         # ⭐ 逐动作画布：不写 → None → 回落顶层（向后兼容）
+                         canvas=tuple(v["canvas"]) if v.get("canvas") else None,
+                         anchor=tuple(v["anchor"]) if v.get("anchor") else None,
+                         start=int(v.get("start", 0)))
     b = d.get("behaviour", {})
     beh = Behaviour(
         idle_duration=tuple(b.get("idle_duration", (3.0, 8.0))),
@@ -213,6 +246,14 @@ class Body:
             self.vy = 0.0
             if not self.on_ground:
                 self.on_ground = True
+        # ⭐⭐ 上：头顶不能超出屏幕顶（2026-09-28 实测缺这条 → 睡眠站起时头顶被切）
+        #   silhouette 的 dtp 是【负数】（向上偏移），所以 top_limit = st - dtp = st + |dtp|
+        #   ⛔ 睡眠动作站姿帧轮廓高 507，比 idle 的 488 高 → 睡着站起来时最容易顶出去
+        top_limit = float(st - dtp + margin)
+        if self.y < top_limit:
+            self.y = top_limit
+            if self.vy < 0:
+                self.vy = 0.0
 
 
 class Pet:
@@ -371,6 +412,24 @@ class Pet:
     def _goal_reached(self) -> bool:
         return abs(self.goal_x - self.body.x) <= self.behaviour.arrive_eps
 
+    def _arrive(self):
+        """到站：清目标 + 按当前状态接 turn_out / idle
+
+        ⭐⭐ 2026-09-28：走到头停下的"侧身→正面"也必须走 turn_out。
+           ⛔ 旧写法直接 play("idle")：她侧着身子走到目标点，一帧之内变成正面 =
+              Ronny 看到的"转身动作也没有"的另一半。
+        ⭐⭐ 2026-09-28 抽成方法：现在有【两个】入口会走到这里 ——
+           ① update() 里 `_goal_reached()` 判定到达
+           ② step() 里发现被墙挡住、目标永远够不到（见那里的注释）
+           两处的收尾动作必须一致，所以合并成一个。
+        """
+        self.goal = None
+        if self.state == "walk" and self._has("turn_out"):
+            self.play("turn_out")     # 播完由 step() 接 idle + 重设 state_timer
+        else:
+            self.state_timer = random.uniform(*self.behaviour.idle_duration)
+            self.play("idle")
+
     def _idle_pick(self):
         """待机 / 走路计时结束后，挑下一个动作
 
@@ -390,9 +449,30 @@ class Pet:
             if self.state != "walk":
                 if random.random() < b.turn_chance:
                     self.facing_right = not self.facing_right
+            # ⭐⭐ 2026-09-28 转身接线（Ronny：转身动作也没有）
+            #   走路素材原生朝右；turn_in 原生：正面(#0-#15) → 侧身朝右(#17)。
+            #   起步方向与目标一致后播 turn_in，播完由 step() 接 walk。
+            #   ⛔ 镜像规则（ui.paintEvent）：turn_in / walk 同用 facing_right ——
+            #      朝右走 = 原生；朝左走 = 镜像 → 转身结束时面朝与 walk 起步一致，无硬切。
+            if self.state != "walk" and self._has("turn_in"):
+                if self.goal is not None:
+                    self.facing_right = self.goal_x > self.body.x   # 转向 = 起步方向
+                self.play("turn_in")
+                return                                              # state_timer 由 turn_in 播完重设
             self.play("walk")
             self.state_timer = random.uniform(*b.walk_duration)   # ⭐ 必定重设
         else:
+            # ⭐⭐ 2026-09-28 转身接线：走路结束 → 先转回正面（turn_out）再 idle
+            #   turn_out 原生：侧身朝右(#0) → 正面(#11)；镜像规则与 walk 相同。
+            #   ⛔ 目标还没走到、走路计时先到点 → 继续走完，【不能中途停下转身】
+            #     （否则"转身回正面 0.96s → 又马上侧身继续走"，两截动作反复横跳）
+            if self.state == "walk" and self.goal is not None:
+                self.play("walk")
+                self.state_timer = random.uniform(*b.walk_duration)
+                return
+            if self.state == "walk" and self._has("turn_out"):
+                self.play("turn_out")
+                return                                             # 播完由 step() 接 idle
             self.play("idle")
             self.state_timer = random.uniform(*b.idle_duration)   # ⭐ 必定重设
 
@@ -432,15 +512,15 @@ class Pet:
         # ⭐ v0.2：目标导向 —— 有目标就朝它走，到了就停
         #  ⭐ 只在【脚沾地 + 不在下落/落地中】才允许目标驱动走路
         #    ⛔ 否则松手后会立刻从 fall 切回 walk（"拿起来触发不了 fall"的根因）
+        #    ⛔ 2026-09-28：还要排除 turn_in/turn_out —— 否则转身动画每帧被 play("walk") 顶掉，
+        #       "转身"永远播不完（等于没接）
         if (self.goal in ("goto", "seek") and self._pat_t <= 0
-                and self.body.on_ground and self.state not in ("fall", "land")
+                and self.body.on_ground and self.state not in ("fall", "land", "turn_in", "turn_out")
                 and not self.asleep and self._wake_stage == 0):
             if self.goal == "seek" and self._cursor_x is not None:
                 self.goal_x = self._cursor_x
             if self._goal_reached():
-                self.goal = None
-                self.state_timer = random.uniform(*b.idle_duration)
-                self.play("idle")
+                self._arrive()
             else:
                 self.facing_right = self.goal_x > self.body.x
                 if self.state != "walk":
@@ -521,6 +601,15 @@ class Pet:
                 elif self.state == "sleep_out":
                     # ⭐⭐ 起床后接"伸懒腰"（没有素材就降级）
                     self._after_sleep_out()
+                elif self.state == "turn_in":
+                    # ⭐⭐ 2026-09-28 转身接线：正面 → 侧身（朝向已定），现在起步走
+                    #   （state_timer 在这里才重设，turn_in 的时长不占 walk_duration）
+                    self.play("walk")
+                    self.state_timer = random.uniform(*self.behaviour.walk_duration)
+                elif self.state == "turn_out":
+                    # ⭐⭐ 转身接线：侧身 → 正面，收工回 idle
+                    self.play("idle")
+                    self.state_timer = random.uniform(*self.behaviour.idle_duration)
                 elif self.state in ("stretch", "land_settle") and self._wake_stage == 2:
                     self._wake_stage = 0
                     self.play("idle")
@@ -529,7 +618,26 @@ class Pet:
                     self.state_timer = random.uniform(*self.behaviour.idle_duration)
                     self.play("idle")
         self.update(dt)
+        _x_before = self.body.x
         self.body.clamp_to_screen(self.screen, silhouette, self.behaviour.screen_margin)
+
+        # ⭐⭐ 2026-09-28：够不到的目标要主动作废（否则"贴着墙原地走"）
+        #   根因：`_pick_goal` 挑目标写死 ±80px 边距，但角色的**真实轮廓**左右能占
+        #        174/151px（walk），所以目标落进 [sl+80, sl+174) 这一带时她永远走不到 ——
+        #        `_goal_reached()` 判 `|goal_x - body.x| <= arrive_eps`，被墙挡住就永远为假。
+        #   ⛔ 09-28 加了"有目标就不许停（不许中途转身）"之后，这里从"能自愈"
+        #      （原来走完计时会回 idle、重挑目标）变成"不自愈"：
+        #      实测她会贴着墙原地走，直到 40~90 秒后按睡眠计时睡着才解脱。
+        #      `_自测_转身接线.py` ⑩ 就是这么挂的（那次还把睡眠关了，于是永久卡住）。
+        #   ✅ 判据：本帧被 clamp 挪动了，且目标还在被挡住的那一侧 → 认作"到站"，
+        #      走 `_arrive()`（清目标 + turn_out → idle）。
+        #      ⭐ 用"被挡住"而不是"预测可达范围"：不必知道各动作轮廓，
+        #        对 seek（光标在屏外）这类目标同样成立。
+        if self.goal is not None and self.state == "walk" and self.body.x != _x_before:
+            blocked_left = self.body.x > _x_before and self.goal_x < self.body.x
+            blocked_right = self.body.x < _x_before and self.goal_x > self.body.x
+            if blocked_left or blocked_right:
+                self._arrive()
 
         # 走路/待机计时切换
         if self.state in ("idle", "walk"):
