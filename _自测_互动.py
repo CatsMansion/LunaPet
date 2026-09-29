@@ -55,7 +55,8 @@ QTest.mousePress(w, Qt.LeftButton, Qt.NoModifier, QPoint(256, 420))
 QTest.mouseMove(w, QPoint(336, 420))     # 真的移动 80px
 QTest.mouseRelease(w, Qt.LeftButton, Qt.NoModifier, QPoint(336, 420))
 n_ok += check("拖完不加好感度", w.pet.mood <= m2 + 0.01, f"{m2:.0f} → {w.pet.mood:.0f}")
-n_ok += check("进入下落（说明当成拖拽处理了）", w.pet.state == "fall", f"state={w.pet.state}")
+# ⭐ 2026-09-29 修正断言：松手是 drag_out（松手过渡）→ fall，先看到 drag_out。
+n_ok += check("进入下落（说明当成拖拽处理了）", w.pet.state in ("drag_out", "fall"), f"state={w.pet.state}")
 
 print()
 print("=== ⭐ 目标导向：给个目标她会走过去 ===")
@@ -84,7 +85,9 @@ n_ok += check("先进入走路（目标导向）", w.pet.state == "walk", f"stat
 w.pet.begin_drag(w.pet.body.x, w.pet.body.y)
 n_ok += check("拿起后目标被清空", w.pet.goal is None, f"goal={w.pet.goal}")
 w.pet.end_drag()
-n_ok += check("松手触发 fall", w.pet.state == "fall", f"state={w.pet.state}")
+# ⭐ 2026-09-29 修正断言：素材升级后松手拆成两段 —— drag_out（松手过渡）→ fall。
+#   end_drag() 之后立刻看到的是 drag_out，不是 fall。
+n_ok += check("松手触发下落（drag_out 或 fall）", w.pet.state in ("drag_out", "fall"), f"state={w.pet.state}")
 for _ in range(150):
     w.pet.step(1 / 60, (-256, 256, -512, 0))
 n_ok += check("落地后恢复到常态", w.pet.state in ("land", "idle", "walk"), f"state={w.pet.state}")

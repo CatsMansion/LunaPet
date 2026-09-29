@@ -38,6 +38,24 @@ class Action:
     #    #9 起才真正转身（11%→22%）。整段播 = 决定走路后原地站 0.72s 才动身，观感迟钝。
     #    pet.json 里给 turn_in 写 "start": 9 → 只播转身段。
     start: int = 0
+    # ⭐⭐ 2026-09-28：动作切换的几何补偿数据（由装机脚本预计算写进 pet.json）
+    #    角色 bbox 中心在【画布】内的坐标。切动作时用它让【角色视觉位置】连续 ——
+    #    否则"躺→站"这类切换会因 anchor / 画布尺寸不同而整只跳走。
+    #    实测：sleep_out 末帧中心 x=358.5 vs idle x=273 → 无补偿时水平跳 85px（Ronny 看到的"闪烁"）。
+    entry_center: Optional[Tuple[float, float]] = None
+    exit_center: Optional[Tuple[float, float]] = None
+    # ⭐⭐ 2026-09-29：叠加道具层（方案 B）
+    #    角色帧之上，按帧号叠一张或多张 PNG 并控制显隐。
+    #    ⭐ 用途（Ronny：「端起饭碗一口闷，吃完碗应该是空的」）：
+    #      角色视频里的碗**始终画成空的**，碗里的食物由这里叠加 →
+    #      "吃完碗空"= 到某一帧把食物层隐藏 = 【确定性代码控制】，不靠 AI 画对。
+    #    每项字段（全部可选，缺省见 ui.py `_draw_overlays`）：
+    #      image : str         —— ui/ 下的文件名（如 "food_chicken.png"）
+    #      anchor: [x, y]      —— 叠加图左上角相对【本动作 anchor】的偏移（画布坐标）
+    #      scale : float       —— 额外缩放（1.0 = 原始像素）
+    #      show  : [起帧, 止帧] —— 只在这段帧号内显示（含端点；缺省=全程）
+    #      fade_out: [起帧, 止帧] —— 在这段内由全显渐隐到 0（用于"吃完了"）
+    overlays: Optional[list] = None
 
     @property
     def frame_dt(self) -> float:
@@ -143,7 +161,11 @@ def load_pack(folder: str) -> PetPack:
                          # ⭐ 逐动作画布：不写 → None → 回落顶层（向后兼容）
                          canvas=tuple(v["canvas"]) if v.get("canvas") else None,
                          anchor=tuple(v["anchor"]) if v.get("anchor") else None,
-                         start=int(v.get("start", 0)))
+                         start=int(v.get("start", 0)),
+                         entry_center=tuple(v["entry_center"]) if v.get("entry_center") else None,
+                         exit_center=tuple(v["exit_center"]) if v.get("exit_center") else None,
+                         # ⭐ 叠加道具层（缺省 None = 无叠加，不影响现有动作）
+                         overlays=list(v["overlays"]) if v.get("overlays") else None)
     b = d.get("behaviour", {})
     beh = Behaviour(
         idle_duration=tuple(b.get("idle_duration", (3.0, 8.0))),
@@ -298,12 +320,42 @@ class Pet:
         self.play("idle")
 
     # ---------- 动作 ----------
+    def _center_near(self, name: str, near_end: bool):
+        """取某动作的"角色中心"（画布坐标）。near_end=True 用退出中心，否则用入口中心。"""
+        a = self.pack.actions.get(name)
+        if a is None:
+            return None
+        return (a.exit_center or a.entry_center) if near_end else (a.entry_center or a.exit_center)
+
     def play(self, name: str):
         act = self.pack.actions.get(name)
         if act is None:
             return
         if self.anim and self.anim.act.name == name and act.loop in ("cycle", "pingpong"):
             return
+        # ⭐⭐ 2026-09-28 修：动作切换的几何补偿（Ronny：「sleep out 和 default 中间有闪烁」）
+        #   渲染恒等式 W = body - anchor（ui.py `_apply_pos`），角色锚点的屏幕坐标 = W + a = body。
+        #   要求切换前后【角色的世界坐标】不变 ⇒ body 不该动；
+        #   要求切换前后【画面上的落地点】不变 ⇒ 只需补 anchor 差：
+        #       body += (a_new - a_old)
+        #
+        #   ⛔⛔ 2026-09-29 修（Ronny：「sleep out 之后人物往上闪现了大概半个身位」）
+        #   上一版还额外补偿了 bbox 中心差 (c_old - c_new)，**这是错的**。
+        #   实测：sleep_out→stretch 单帧跳 (+118.5, -20.0)，sleep_out→idle 跳 (+101.5, -12.0)。
+        #   根因：`c` 是【角色 bbox 在画布内的构图位置】，不是角色在世界里的位置。
+        #   sleep_out 这一个动作内部，角色从趴姿（中心 y=419）爬起到站姿（中心 y=257.5），
+        #   构图本身就在画布内大幅移动 —— 这是**素材内部该发生的位移**，
+        #   补偿再去用 c_old 反推 body，等于把同一份位移做了两遍，角色整体向上飞。
+        #   ✅ 只用 anchor 差后：sleep_out→stretch 只动 (+16, -6)，stretch→idle 动 (0, 0)（anchor 相同）。
+        #   ⚠️ 副作用：sleep_out 末帧构图偏右（中心 x=358.5）会保留 ——
+        #      但那是**素材构图**问题，该在素材层修（重出/重裁 sleep_out），不该用位置补偿掩盖。
+        old_name = self.state
+        if self.anim is not None and old_name != name:
+            a_old = self.pack.anchor_of(old_name)
+            a_new = self.pack.anchor_of(name)
+            if a_old and a_new:
+                self.body.x += (a_new[0] - a_old[0])
+                self.body.y += (a_new[1] - a_old[1])
         self.anim = Anim(act)
         self.state = name
 
@@ -595,12 +647,27 @@ class Pet:
                 # 一次性动作播完 → 按状态决定接什么
                 if self.state == "fall":
                     self.play("land")
+                elif self.state == "drag_in":
+                    # ⭐⭐ 2026-09-29「拿起过渡」播完 → 接悬挂循环（drag）
+                    #   素材：drag_in 末帧 = drag 首帧（同一源帧，实测 XOR 0.00%）→ 零缝
+                    self.play("drag")
+                elif self.state == "drag_out":
+                    # ⭐⭐ 2026-09-29「松手过渡」播完 → 接下落（fall）
+                    #   素材：drag_out 末帧宽 333 ≈ fall_0 的 326（差 7px）。
+                    #   没有这段时 drag(227) 直接跳 fall(324)，宽度落差 43%，松手瞬间整只撑开。
+                    self.play("fall")
                 elif self.state == "sleep_in":
                     # ⭐ 睡下 → 接睡眠循环
                     self.play("sleep_loop" if self._has("sleep_loop") else "idle")
                 elif self.state == "sleep_out":
                     # ⭐⭐ 起床后接"伸懒腰"（没有素材就降级）
                     self._after_sleep_out()
+                elif self.state == "tease":
+                    # ⭐⭐ 2026-09-29 逗猫/激光笔：跳起来抓完 → 回站姿
+                    #   ⛔ tease 若是 cycle 会永远循环、她一直扑 → 改成 once（pet.json）。
+                    #   ⭐ 回 idle 后激光笔的 _laser_tick 会重新给目标 → 继续追。
+                    self.play("idle")
+                    self.state_timer = random.uniform(*self.behaviour.idle_duration)
                 elif self.state == "turn_in":
                     # ⭐⭐ 2026-09-28 转身接线：正面 → 侧身（朝向已定），现在起步走
                     #   （state_timer 在这里才重设，turn_in 的时长不占 walk_duration）
@@ -643,7 +710,14 @@ class Pet:
         if self.state in ("idle", "walk"):
             self.state_timer -= dt
             if self.state_timer <= 0:
-                self._idle_pick()
+                # ⭐⭐ 2026-09-29：激光笔在手（goal=="seek"）时**不许挑漫游目标** ——
+                #   ⛔ 否则 _idle_pick() → _pick_goal() 会把 seek 目标顶成随机点，
+                #      她掉头走反方向（实测 goal_x 2200 → 83）。
+                #   ✅ seek 期间只续期计时，方向永远由 _laser_tick 每帧重设。
+                if self.goal == "seek":
+                    self.state_timer = random.uniform(*self.behaviour.walk_duration)
+                else:
+                    self._idle_pick()
 
     # ---------- 拖拽 ----------
     def begin_drag(self, mx: float, my: float):
@@ -663,18 +737,10 @@ class Pet:
         self._tilt_vx = 0.0
         self._tilt_vx_f = 0.0
         self._tilt_ax_f = 0.0
-        # ⭐⭐ 2026-09-28 修：切换动作前先记下【旧动作】的贴附点。
-        #   渲染恒等式 W = B - anchor（ui.py `_apply_pos`），而"拎起来"这个动作
-        #   有自己的 anchor（抓取点，在身体上部），与待机/走路的"脚底"差 300+px。
-        #   ⛔ 若只 play 不补偿：anchor 一变，窗口位置立刻按新 anchor 重算 →
-        #      按下鼠标的瞬间角色"跳"一下（Ronny 实机反馈「drag 会位移」）。
-        #   ✅ 补偿：让 body 同步平移 (a_new - a_old)，使 W 保持不变 → 切换无感。
-        _prev = self.state
-        self.play("drag")
-        a_old = self.pack.anchor_of(_prev)
-        a_new = self.pack.anchor_of("drag")
-        self.body.x += a_new[0] - a_old[0]
-        self.body.y += a_new[1] - a_old[1]
+        # ⭐⭐ 2026-09-29：先播「被拿起」的过渡（drag_in，once 1 秒），再进悬挂循环（drag）。
+        #    旧写法直接 play("drag")，从待机站姿瞬间切成悬挂，Ronny 实机反馈「拿起之前没有动画」。
+        #    过渡素材一直躺在源视频里（站立→收拢段），此前装机只取了后半段悬挂。
+        self.play("drag_in" if self._has("drag_in") else "drag")
         self._tilt_x = self.body.x      # ⭐ 补偿后重设，避免第一帧算出虚假鼠标速度
 
     def move_drag(self, mx: float, my: float):
@@ -684,14 +750,10 @@ class Pet:
     def end_drag(self):
         self.dragging = False
         self.body.on_ground = False
-        # ⭐⭐ 2026-09-28 修：与 begin_drag 对称 —— 从"抓取点"锚点切回"脚底"锚点时，
-        #   同步平移 body，保证窗口位置不变（否则松手瞬间角色会瞬移 300+px）。
-        _prev = self.state
-        self.play("fall")
-        a_old = self.pack.anchor_of(_prev)
-        a_new = self.pack.anchor_of("fall")
-        self.body.x += a_new[0] - a_old[0]
-        self.body.y += a_new[1] - a_old[1]
+        # ⭐⭐ 2026-09-29：松手先播「展开下落」过渡（drag_out，once 0.67s），再进 fall。
+        #    旧写法直接 play("fall")，从收拢悬挂(宽227)瞬间撑成舒展下落(宽324)，
+        #    Ronny 实机反馈「和 fall 衔接不连贯」。
+        self.play("drag_out" if self._has("drag_out") else "fall")
 
     def current_frame_path(self):
         if not self.anim:

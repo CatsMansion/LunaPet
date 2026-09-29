@@ -9,13 +9,11 @@ rem ===========================================================================
 setlocal
 cd /d "%~dp0"
 
-rem 运行环境：默认用 PATH 里的 python。要用指定解释器就改下面这行
-set "PY=python"
+rem 运行环境（自带 PySide6 6.11.2 的那个解释器）
+set "PY=C:\Users\mercy\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 
-where %PY% >nul 2>&1
-if errorlevel 1 (
-    echo [x] PATH 里找不到 python。请把上面那行改成解释器的完整路径，例如：
-    echo     set "PY=C:\Python312\python.exe"
+if not exist "%PY%" (
+    echo [x] 找不到解释器：%PY%
     exit /b 1
 )
 

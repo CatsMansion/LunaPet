@@ -141,9 +141,7 @@ a = Analysis(
     pathex=[os.path.join(ROOT, "pet_engine")],        # 让 core / ui 能被找到
     binaries=[],
     # ⭐ 角色包整个塞进包里 → 用户双击 exe 就能看到宠物，不需要额外放文件
-    # ⭐ 角色素材不随仓库发布 → 存在才打包；缺了也能构建
-    datas=([(os.path.join(ROOT, "packs"), "packs")]
-           if os.path.isdir(os.path.join(ROOT, "packs")) else []),
+    datas=[(os.path.join(ROOT, "packs"), "packs")],
     # core.py / ui.py 在 pet_engine/ 下，是被 run.py 以顶层模块名导入的，静态分析看不到
     hiddenimports=["ui", "core", "pet_engine.console", "console"],
     hookspath=[],
@@ -192,9 +190,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # ⭐ 图标是角色资产，不随仓库发布 → 没有就不带图标
-    icon=os.path.join(ROOT, "app_icon.ico")
-    if os.path.exists(os.path.join(ROOT, "app_icon.ico")) else None,
+    icon=os.path.join(ROOT, "app_icon.ico"),
 )
 
 coll = COLLECT(
