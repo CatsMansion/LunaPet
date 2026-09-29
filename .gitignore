@@ -26,3 +26,19 @@ env/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ---- 凭据 / 密钥（⛔ 永远不要提交）----
+# ⭐ 2026-09-30 加：此前 .gitignore 只在忽略构建产物，一旦 `git add .`
+#    或整目录推，密钥文件会直接进仓库，而 GitHub push protection
+#    未必覆盖国产通道（火山 Ark / 火山 token 等）的格式 → 挡不住。
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.token
+*_secret*
+*_credential*
+secrets/
+credentials/
+工具/
