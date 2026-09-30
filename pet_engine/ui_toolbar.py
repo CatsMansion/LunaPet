@@ -195,7 +195,13 @@ class ToolBar(QWidget):
         p.drawRoundedRect(r, 8, 8)
         cx, cy = r.center().x(), r.center().y()
 
-        pm = self.icons.get(key)
+        # ⛔⛔ 2026-09-29 Ronny 目检：「枕头有点看着不像枕头」
+        #   查明：packs/luna/ui/pillow.png 画的其实是**派/馅饼**（棕饼皮 + 奶油馅 +
+        #        中央核 + 放射纹），不是枕头。⚠️ pillow 的素材还在派单队列里没重出，
+        #        重出之前**必须屏蔽这张错素材**，否则程序绘制的真枕头永远不生效。
+        #   ✅ 等新 pillow.png 装机后，把 "pillow" 从本集合里删掉即可。
+        _BAD_ASSET = {"pillow"}
+        pm = None if key in _BAD_ASSET else self.icons.get(key)
         if pm is not None:
             # 等比缩到槽内（留 8px 内边距），居中绘制
             s = min(r.width() - 16, r.height() - 16)

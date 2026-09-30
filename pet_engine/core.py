@@ -108,6 +108,10 @@ class Behaviour:
     tilt_drive_exp: float = 1.6        # ⭐ 力的指数曲线：>1 → 慢移几乎不倾、快甩才猛涨
     screen_margin: int = 0
     walk_speed: float = 1.0        # 走速倍率（手感微调用）
+    # ⭐⭐ 2026-09-29 Ronny 定：激光笔在手时移速暴增至该倍率（露娜 = 2.5）
+    #   为什么单列一个数：这是**角色设定**（猫的兴奋程度/体能），不是引擎常数。
+    #   以后放到角色包里，一只猫一个值 —— 同样的红点，慢猫和快猫反应不一样。
+    laser_speed_mul: float = 2.5
     # ⭐⭐ 睡眠（2026-09-26）：连续待机多久睡着 → 睡着 → 叫醒 → 伸懒腰
     sleep_after: Tuple[float, float] = (40.0, 90.0)   # 连续无互动多久入睡（秒，随机区间）
     sleep_mood_decay_scale: float = 0.2               # 睡着时好感度衰减倍率（睡得香，掉得慢）
@@ -125,6 +129,10 @@ class PetPack:
     actions: Dict[str, Action]
     behaviour: Behaviour
     scale: float = 1.0
+    # ⭐⭐ 2026-09-30：桌面上这个角色该多大 —— 这是**角色设定**（和 laser_speed_mul 同类），
+    #   不是引擎常数。⛔ 此前它被硬编码在 ui.py 里（0.45*(1/0.85)^3），
+    #   调大小必须改代码，而且让所有 anchor×s 的算式带上非整数倍。
+    display_scale: float = 1.0
 
     def frame_path(self, action: str, idx: int) -> str:
         return os.path.join(self.root, "action", f"{action}_{idx}.png")
@@ -191,6 +199,7 @@ def load_pack(folder: str) -> PetPack:
         tilt_drive_exp=float(b.get("tilt_drive_exp", 1.6)),
         screen_margin=int(b.get("screen_margin", 0)),
         walk_speed=float(b.get("walk_speed", 1.0)),
+        laser_speed_mul=float(b.get("laser_speed_mul", 2.5)),
         sleep_after=tuple(b.get("sleep_after", (40.0, 90.0))),
         sleep_mood_decay_scale=float(b.get("sleep_mood_decay_scale", 0.2)),
         wake_radius=float(b.get("wake_radius", 120.0)),
@@ -200,7 +209,8 @@ def load_pack(folder: str) -> PetPack:
     return PetPack(name=d.get("name", os.path.basename(folder)), root=folder,
                    canvas=tuple(d.get("canvas", (512, 512))),
                    anchor=tuple(d.get("anchor", (256, 512))),
-                   actions=acts, behaviour=beh, scale=float(d.get("scale", 1.0)))
+                   actions=acts, behaviour=beh, scale=float(d.get("scale", 1.0)),
+                   display_scale=float(d.get("display_scale", 1.0)))
 
 
 # ============================================================================
@@ -310,6 +320,10 @@ class Pet:
         self.goal_x = 0.0
         self._pat_t = 0.0              # 被摸剩余时间
         self._cursor_x = None          # 最近一次光标位置（由 UI 喂进来）
+        # ⭐⭐ 2026-09-30 光标唤醒改【边沿触发】：记上一帧光标在不在 wake_radius 内。
+        #   为什么：点枕头让她睡时鼠标正压在她身上（距离 0px），
+        #   电平触发会让她刚躺下就被自己的鼠标摇醒 → 播 sleep_out（Ronny 报的 bug）。
+        self._cursor_near = False
         self._hearts = []              # ⭐ 供 UI 画的爱心（(t秒, x偏移)）            # ⭐ 当前走路速度（平滑跟随目标，掉头时过零）
         # ⭐⭐ 睡眠状态（2026-09-26）
         self.asleep = False            # 正在睡（sleep_in 之后 / sleep_loop 中）
@@ -349,13 +363,21 @@ class Pet:
         #   ✅ 只用 anchor 差后：sleep_out→stretch 只动 (+16, -6)，stretch→idle 动 (0, 0)（anchor 相同）。
         #   ⚠️ 副作用：sleep_out 末帧构图偏右（中心 x=358.5）会保留 ——
         #      但那是**素材构图**问题，该在素材层修（重出/重裁 sleep_out），不该用位置补偿掩盖。
-        old_name = self.state
-        if self.anim is not None and old_name != name:
-            a_old = self.pack.anchor_of(old_name)
-            a_new = self.pack.anchor_of(name)
-            if a_old and a_new:
-                self.body.x += (a_new[0] - a_old[0])
-                self.body.y += (a_new[1] - a_old[1])
+        # ⭐⭐⭐ 2026-09-30：切动作的几何补偿**整体搬到 UI 层**（PetWindow._compensate_switch）。
+        #   ⛔ 这里原来做 `body += (a_new - a_old)`（anchor 差），是错的口径：
+        #      anchor 差 ≠ "角色在画面上的实际贴地点之差"。
+        #      实测（切动作时角色最低点的屏幕跳变）：
+        #        sleep_out 末帧 → idle 首帧   水平 +74.4px / 垂直 -9.5px
+        #        sleep_out 末帧 → stretch 首帧 水平 +86.8px / 垂直 -9.5px
+        #        idle 末帧 → sleep_in 首帧     水平 -55.0px
+        #      因为 sleep 三件套画布 520x536 / anchor.x=240，而站姿段素材构图偏右
+        #      （末帧 bbox 中心 358.5，idle 是 273）→ 一切回 idle 就横向瞬移 74px。
+        #   ✅ 正确口径只有 UI 层能算：它手里有**每一帧的真实 bbox**。
+        #      补偿判据 = 让"角色在屏幕上的最低点"与"中轴"在切换前后不动：
+        #          屏幕最低点 = body.y + (y1_img − anchor.y) × s
+        #          屏幕中轴   = body.x + ((x0+x1)/2 − anchor.x) × s
+        #      （推导见 ui.py `_compensate_switch`）
+        _ = self.state
         self.anim = Anim(act)
         self.state = name
 
@@ -371,6 +393,12 @@ class Pet:
         self.goal = None
         self._sleep_t = 0.0
         self._wake_stage = 0
+        # ⭐⭐ 2026-09-30：入睡瞬间【预热"光标在不在附近"】。
+        #   ⛔ 否则入睡第一帧会把"光标本来就压在她身上"误判成"刚从外面进来" → 立刻摇醒。
+        #     （_dbg_枕头.py 冷启动 A 组就是这么被摇醒的：光标距离 0 ≤ wake_radius 120）
+        if self._cursor_x is not None:
+            self._cursor_near = (abs(self._cursor_x - self.body.x)
+                                 <= self.behaviour.wake_radius)
         if self._has("sleep_in"):
             self.play("sleep_in")            # 播完由 step() 接到 sleep_loop
         else:
@@ -421,10 +449,34 @@ class Pet:
         self.state_timer = random.uniform(*b.idle_duration)
 
     def _wake_from_cursor(self):
-        """光标靠近就把她吵醒（睡着时才会触发）"""
-        if not self.asleep or self._cursor_x is None:
+        """光标靠近就把她吵醒（⭐ 边沿触发：从半径外【进来】那一下才算）
+
+        ⛔⛔ 2026-09-30 修（Ronny：「睡觉还是一键 sleep out 不是 sleep in」）
+           旧写法是【电平触发】——只要睡着时光标在 wake_radius 内就唤醒。
+           而"点枕头让她睡"这个操作，鼠标必然【正压在她身上】（距离 0px）：
+             点枕头 → asleep=True → play(sleep_in) → 播完接 sleep_loop
+             → 下一帧 _wake_from_cursor 发现光标距离 0 ≤ 120 → wake → play(sleep_out)
+             → 玩家看到的就是"刚躺下又站起来"。
+           ⭐ 实测（_dbg_枕头.py）：
+             光标停在她身上 → sleep_in → **sleep_out** → idle   ⛔
+             光标挪开 300px → sleep_in → sleep_loop            ✅
+
+        ✅ 改为【边沿触发】：只有光标"从半径外进入半径内"的那一刻才唤醒。
+           · 鼠标一直压着她（刚点完枕头）→ 不打扰，她安稳睡着
+           · 鼠标移开再移回 → 正常叫醒
+           · 点击 / 拖拽 仍照旧能叫醒（不走这条路径）
+        """
+        if self._cursor_x is None:
             return
-        if abs(self._cursor_x - self.body.x) <= self.behaviour.wake_radius:
+        near = abs(self._cursor_x - self.body.x) <= self.behaviour.wake_radius
+        # ⭐⭐ 无论睡没睡都要刷新"上一帧在不在附近"——
+        #   ⛔ 旧写法在没睡时直接 return，导致睡着那一帧 was_near 还是陈旧值，
+        #      光标若正压在她身上就会立刻被判成"刚从外面进来" → 又把她摇醒。
+        was_near = self._cursor_near
+        self._cursor_near = near
+        if not self.asleep:
+            return
+        if near and not was_near:
             self.wake("cursor")
 
     # ---------- ⭐ v0.2：互动 ----------
@@ -588,7 +640,11 @@ class Pet:
         # 走路位移：⭐ 由 stride_px 推出的每帧位移 × 该帧播放速度
         if self.state == "walk":
             act = self.pack.actions["walk"]
-            spd = act.move_per_frame * act.fps * b.walk_speed   # px/s
+            # ⭐⭐ 2026-09-29 Ronny：追激光红点时移速暴增至 laser_speed_mul 倍
+            #   （露娜 = 2.5。她看到红点会兴奋地扑过去，不是平常散步的速度）
+            #   ⛔ 只对 seek（追红点）生效，普通漫游 goto 不受影响。
+            _mul = b.laser_speed_mul if self.goal == "seek" else 1.0
+            spd = act.move_per_frame * act.fps * b.walk_speed * _mul   # px/s
             tgt = spd * (1.0 if self.facing_right else -1.0)
             # ⭐⭐ 掉头缓动：换向时速度平滑过零（减速 → 微顿 → 反向加速）
             #    不做这一步的话，facing_right 一翻，人物一帧之内就掉头往回走 = 一顿 = 左右闪烁

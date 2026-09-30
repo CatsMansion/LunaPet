@@ -86,6 +86,26 @@ def silhouette_of(imgs: list, anchor: Tuple[int, int]) -> Tuple[int, int, int, i
     return (int(left), int(right), int(top), int(bottom))
 
 
+def frame_stance(im, anchor: Tuple[int, int]) -> Tuple[float, float]:
+    """⭐ 单帧的"站位偏移"：(中轴 − anchor.x, 最低点 − anchor.y)，画布像素，未乘 user_scale
+
+    ⭐⭐ 2026-09-30 新增，用于切动作时的几何补偿。
+    ⛔ 为什么不用 `silhouette_of`（整动作并集）：并集给的是"所有帧的极值"，
+       而切换发生在**具体某一帧**上 —— 实测 sleep_out 末帧（站姿）与并集最低点
+       差 15px，用并集补偿等于没补。
+    """
+    a8 = im.convertToFormat(QImage.Format_Alpha8)
+    w, h = a8.width(), a8.height()
+    stride = a8.bytesPerLine()
+    buf = np.frombuffer(a8.constBits(), dtype=np.uint8, count=stride * h)
+    alpha = buf.reshape(h, stride)[:, :w]
+    ys, xs = np.nonzero(alpha > 16)
+    if xs.size == 0:
+        return 0.0, 0.0
+    return (float(xs.min() + xs.max()) / 2.0 - anchor[0],
+            float(ys.max()) - anchor[1])
+
+
 class PetWindow(QWidget):
     def __init__(self, pack: PetPack):
         super().__init__()
@@ -106,6 +126,13 @@ class PetWindow(QWidget):
         self.sils: Dict[str, Tuple[int, int, int, int]] = {}
         for name, imgs in self.frames.items():
             self.sils[name] = silhouette_of(imgs, pack.anchor_of(name))
+        # ⭐⭐ 2026-09-30：逐帧"站位偏移"，供切动作的几何补偿用（见 _compensate_switch）
+        self.frame_stance: Dict[str, list] = {}
+        for name, imgs in self.frames.items():
+            an = pack.anchor_of(name)
+            self.frame_stance[name] = [frame_stance(im, an) for im in imgs]
+        self._last_act: Optional[str] = None      # 上一帧画的动作（补偿要拿它的当前帧）
+        self._last_idx: int = 0
         # 默认轮廓（当前动作没算出来时的兜底）＝ 所有动作的并集
         all_imgs = [im for v in self.frames.values() for im in v]
         self.sil = silhouette_of(all_imgs, pack.anchor)
@@ -129,7 +156,15 @@ class PetWindow(QWidget):
         #   ⛔ 此前 pet.json 的 scale 从未接进渲染（只存在于配置里）
         # ⭐ Apple 2026-09-29 Ronny：默认大小 = 「从最小档往上放大 3 次」
         #   0.45 × (1/0.85)³ ≈ 0.733 —— 开箱就是小猫尺寸，往上 3 次回原始感，往下 3 次到最小
-        self.user_scale = 0.45 * (1.0 / 0.85) ** 3   # 当前显示倍率
+        # ⭐⭐ 2026-09-30：显示倍率改为从**角色包**读（pet.json `display_scale`），默认 1.0。
+        #   ⛔ 旧写法硬编码 `0.45 * (1.0/0.85)**3 = 0.7328` ——
+        #      那是「变小魔法棒」的**运行时状态**被写死进了代码：
+        #        ① 从此所有 `anchor × s` 的算式都带非整数倍，成为"拖拽偏 136px"的温床
+        #        ② 想调整体大小必须改代码，而它本质上是一条**角色设定**
+        #      （这只猫在桌面上该多大）。
+        #   ✅ 现在：pet.json 写 display_scale，代码里 user_scale 只是"当前倍率"，
+        #      魔法棒仍可在它基础上左键变小 / 右键变大（0.45~1.60 夹取）。
+        self.user_scale = float(getattr(pack, "display_scale", None) or 1.0)
         self._scale_anim = []          # 缓动队列：[(目标倍率)]
         self._fx_t = 0.0               # 魔法光效剩余时间（秒）
         self._fx_kind = 'shrink'
@@ -184,11 +219,62 @@ class PetWindow(QWidget):
         return self.pack.anchor_of(act) if act else self.pack.anchor
 
     def _cur_sil(self) -> Tuple[int, int, int, int]:
-        """⭐ 当前动作的轮廓（横画幅趴姿宽度大，必须用自己的）"""
+        """⭐ 当前动作的轮廓（横画幅趴姿宽度大，必须用自己的）
+
+        ⭐⭐ 2026-09-30 修：轮廓也要乘 user_scale。
+           轮廓是**屏幕像素**口径（core 拿它做 clamp_to_screen 限位），
+           若显示只有 73% 而轮廓仍是 100%，限位框就比实际大 36% →
+           她能半个身子走出屏幕。同 `_apply_pos` / `paintEvent` 统一口径。
+        """
         act = self.pet.anim.act.name if self.pet.anim else None
-        if act and act in self.sils:
-            return self.sils[act]
-        return self.sil
+        sil = self.sils[act] if (act and act in self.sils) else self.sil
+        s = self.user_scale
+        if abs(s - 1.0) < 1e-3:
+            return sil
+        return (int(sil[0] * s), int(sil[1] * s), int(sil[2] * s), int(sil[3] * s))
+
+    def _compensate_switch(self):
+        """⭐⭐ 切动作时让【角色在屏幕上的位置】不跳（2026-09-30）
+
+        ⭐ 屏幕坐标推导（W = 窗口左上，a = 本动作 anchor，s = user_scale）：
+              W = body − a × s                            （`_apply_pos`）
+              图像左上在窗口内 = (a.x×s − pw/2, a.y×s − ph)（`paintEvent`）
+          ⇒ 图像内像素 (px, py) 的屏幕坐标
+              = W + 图像左上 + (px×s, py×s)
+              = (body.x + (px − a.x)×s,  body.y + (py − a.y)×s)
+          ⭐⭐ 结论：**与 anchor 无关**！只取决于 body、user_scale、
+             以及该像素在图像内的位置。
+
+        ⛔ 所以 core 里原来的 `body += (a_new − a_old)` 是错的口径 —— anchor 差
+           不等于"角色实际站位差"，而且跨画布时两个 anchor 根本不在一个坐标系里。
+
+        ✅ 正确做法：让切换前后，角色的【中轴】与【最低点】屏幕坐标不变：
+              body.x + cx_old×s = body'.x + cx_new×s   →  body.x += (cx_old − cx_new)×s
+              body.y + bot_old×s = body'.y + bot_new×s →  body.y += (bot_old − bot_new)×s
+           其中 (cx, bot) = 该帧的 (中轴 − anchor.x, 最低点 − anchor.y)，见 `frame_stance`。
+
+        ⭐ 实测（未补偿时的屏幕跳变）：
+              sleep_out 末帧 → idle 首帧    水平 +74.4px / 垂直 −9.5px
+              sleep_out 末帧 → stretch 首帧  水平 +86.8px / 垂直 −9.5px
+              idle 末帧 → sleep_in 首帧      水平 −55.0px
+        """
+        p = self.pet
+        if not p.anim:
+            return
+        cur = p.anim.act.name
+        idx = p.anim.seq[p.anim.i]
+        prev, pi = self._last_act, self._last_idx
+        self._last_act, self._last_idx = cur, idx
+        if prev is None or prev == cur:
+            return
+        ob, nb = self.frame_stance.get(prev), self.frame_stance.get(cur)
+        if not ob or not nb or pi >= len(ob) or idx >= len(nb):
+            return
+        s = self.user_scale
+        ox, oy = ob[pi]
+        nx, ny = nb[idx]
+        p.body.x += (ox - nx) * s
+        p.body.y += (oy - ny) * s
 
     def _apply_pos(self):
         """把「贴地参考点」换算成窗口左上角"""
@@ -402,14 +488,18 @@ class PetWindow(QWidget):
             pet.goal_x = cx
 
     def _sleep_via_tool(self):
-        pet = self.pet
+        """⭐ 枕头工具：一键让她睡（sleep_in → sleep_loop）
+
+        ⛔⛔ 2026-09-30 修（Ronny：「睡觉还是一键 sleep out 不是 sleep in」）：
+           旧写法在这里自己设 `asleep=True` 再 `play("sleep_in")`，
+           **跳过了 core.fall_asleep() 里的"预热光标位置"这一步** ——
+           而"点枕头"这个动作必然让鼠标正压在她身上（距离 0px），
+           于是入睡第一帧 `_wake_from_cursor` 就把"光标一直在附近"误判成
+           "刚从外面进来" → 立刻 `wake()` → 播 **sleep_out**（她刚躺下又站起来）。
+        ✅ 改为复用 `core.fall_asleep()`，预热 / 清 goal / 记时全部走同一条路。
+        """
         try:
-            if getattr(pet, "asleep", False):
-                return
-            pet.asleep = True
-            pet._sleep_t = 0.0
-            if pet._has("sleep_in"):
-                pet.play("sleep_in")
+            self.pet.fall_asleep()
         except Exception:
             pass
 
@@ -437,13 +527,24 @@ class PetWindow(QWidget):
         self._laser_tick(dt)
         # ⭐ 先按【上一帧动作】的轮廓推进物理
         self.pet.step(dt, self._cur_sil())
+        # ⭐⭐ 切动作 → 先按【真实画面位置】补偿，让角色在屏幕上不跳
+        self._compensate_switch()
         # ⭐ 动作可能刚切换 → 换尺寸。
-        #    ⛔⛔ 尺寸真的变了就【本帧不画】：此刻窗口尺寸与 anchor 还没对齐，
+        #    ⛔⛔ 尺寸真的变了就【本帧不主动重绘】：此刻窗口尺寸与 anchor 还没对齐，
         #       画出来就是 Ronny 看到的那"一帧明显位移"。
         #    ✅ 跳过这一帧绘制（约 16ms，肉眼不可辨），下一帧尺寸已稳定，正常画。
-        if self._sync_action_geometry():
-            return
+        #
+        # ⭐⭐ 2026-09-30 再修（Ronny：「sleepout 和 idle 之间不飞了，改为伸懒腰的时候飞」）：
+        #   ⛔ 旧写法在尺寸变更时**直接 return，跳过了 `_apply_pos()`** ——
+        #      而 `setFixedSize()` 不只是"我们下次不再 update"那么简单，
+        #      它会让 Qt **立刻**重排并重绘一次。那一帧窗口还停在**旧位置**，
+        #      于是"新尺寸 + 旧位置"被画了出来 = 肉眼可见的一次错位/闪飞。
+        #   ✅ 顺序改成：先 resize，**再无条件 `_apply_pos()` 把窗口挪到新 anchor 位置**，
+        #      最后才决定要不要主动重绘。这样即便 Qt 抢先重绘，位置也是对的。
+        changed = self._sync_action_geometry()
         self._apply_pos()
+        if changed:
+            return
         self.update()
 
     # ---------- 绘制 ----------
@@ -709,8 +810,16 @@ class PetWindow(QWidget):
         #     用顶层 anchor 会在睡眠动作下把拖拽坐标算歪）。
         gp = self.mapToGlobal(ev.position().toPoint())
         ax, ay = self._cur_anchor()
-        self.pet.move_drag(gp.x() - self._drag_off.x() + ax,
-                           gp.y() - self._drag_off.y() + ay)
+        # ⭐⭐ 2026-09-30 修（Ronny：「拿起如果在露娜完全把手脚抬起来之前动鼠标
+        #    就会变成鼠标和人物相差很远」）：
+        #   ⛔ 旧写法这里用的是**没乘 user_scale 的 anchor**，而 `_apply_pos` 用的是
+        #      `body − anchor×s`。两边口径不一致 → 每次拖拽恒定偏 `anchor.y×(s−1)`：
+        #        实测 s=0.7328 时，y 方向每帧偏 512×0.2672 = **136px**，
+        #        因为是 1:1 跟随、只是整体平移，看起来就是"人物挂在鼠标旁边很远"。
+        #   ✅ 与 `_apply_pos` / `paintEvent` 统一口径：anchor 一律乘 s。
+        sec = self.user_scale
+        self.pet.move_drag(gp.x() - self._drag_off.x() + ax * sec,
+                           gp.y() - self._drag_off.y() + ay * sec)
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Escape and self._held_tool:
@@ -758,6 +867,14 @@ class PetWindow(QWidget):
         self.frames = frames
         all_imgs = [im for v in frames.values() for im in v]
         self.sil = silhouette_of(all_imgs, pack.anchor)
+        # ⭐⭐ 2026-09-30：逐动作轮廓 + 逐帧站位也必须跟着重建 ——
+        #   ⛔ 旧写法只重建了全局 self.sil，`self.sils`（逐动作限位轮廓）还指向**旧素材**：
+        #      重新抠图 / 换帧之后，限位和切换补偿都在用过期数据。
+        self.sils = {n: silhouette_of(v, pack.anchor_of(n)) for n, v in frames.items()}
+        self.frame_stance = {n: [frame_stance(im, pack.anchor_of(n)) for im in v]
+                             for n, v in frames.items()}
+        self._last_act = None          # 素材换过了，切换补偿的基准清零
+        self._last_idx = 0
         # ⭐ 宠物对象指向新的包/参数（保持位置与状态）
         self.pet.pack = pack
         self.pet.behaviour = pack.behaviour

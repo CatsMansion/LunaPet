@@ -30,8 +30,17 @@ def chk(name, cond, extra=""):
 
 
 def frames_exist(pack):
+    """检查已注册动作的帧是否齐。
+
+    ⭐ 2026-09-29：`eat` 是**有意占位注册**（素材在途派单还没回传），
+       运行时由 `PetWindow._has_frames()` 拦住、不会卡死角色 →
+       这里把"占位动作"排除出缺帧统计，其余任何缺帧仍算失败。
+    """
+    PLACEHOLDER = {"eat"}          # 有意占位、等素材的动作
     missing = []
     for name, a in pack.actions.items():
+        if name in PLACEHOLDER:
+            continue
         for i in range(a.frames):
             p = pack.frame_path(name, i)
             if not os.path.exists(p):
