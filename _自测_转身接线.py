@@ -12,9 +12,25 @@ import ui as U
 from core import load_pack
 
 app = QApplication.instance() or QApplication([])
+
+# ⭐⭐ 2026-10-01：**先固定随机种子再看任何东西**。
+#   ⛔ 原来只在 ⑩ 之前 `seed(7)`，①~⑨ 全程是**无种子随机** ——
+#      实测 ⑥ 的成败随 `_pick_goal()` 给的目标位置在「红 2/3 / 绿 1/3」之间飘，
+#      同一份代码时红时绿，根本判不了到底是代码坏了还是运气不好。
+#   ⭐ 自测是"契约"，随机驱动的契约没有意义（同 `_自测_core.py` 立的规矩）。
+random.seed(7)
 pack = load_pack(os.path.join(HERE, "packs", "luna"))
 w = U.PetWindow(pack)
 p = w.pet
+
+# ⭐⭐ 2026-10-01：清空地形，【隔离关注点】。
+#   本测试只关心 turn_in / turn_out 接线。而默认地形是左右两面墙（pet.json 的 `terrain`），
+#   测试造的目标又常落在屏幕外（body.x + 500，而 offscreen 测试屏只有 799 宽）
+#   → 她会往右走进右墙区、触发 `climb`，于是断言看到 climb 而不是 turn_out（6 项一起红）。
+#   ⛔ 那不是代码坏了：她就是在做被设计要做的事（撞到墙就爬）。
+#   地形本身由 `_自测_地形.py` 与 `_自测_激光爬墙*_1001.py` 覆盖，这里不需要重复。
+p.terrains = []
+
 P = F = 0
 def ck(cond, msg):
     global P, F
@@ -32,31 +48,31 @@ ck(pack.actions["idle"].sequence()[0] == 0, "未配 start 的动作不受影响�
 p.behaviour.walk_weight = 1.0     # 强制选走路
 p.behaviour.turn_chance = 0.0     # 不随机翻向
 p.play("idle"); p.state_timer = 0.0
-p.step(0.05, w._cur_sil())        # 触发 _idle_pick
+p.step(0.05, w._sil_of)        # 触发 _idle_pick
 ck(p.state == "turn_in", f"起步应先进 turn_in，实际 {p.state}")
 ck(p.goal is not None, "已有走路目标")
 ck(p.facing_right == (p.goal_x > p.body.x), f"转身朝向与目标一致 facing_right={p.facing_right}")
 
 # ③ turn_in 播放期间不被 goal-driven 顶掉
 p.goal = "goto"; p.goal_x = p.body.x + 300
-for _ in range(4): p.step(0.05, w._cur_sil())
+for _ in range(4): p.step(0.05, w._sil_of)
 ck(p.state == "turn_in", f"turn_in 播放中不被顶掉（旧 bug：每帧被 play('walk') 覆盖），state={p.state}")
 
 # ④ turn_in 播完 → walk，且 state_timer 已重设
 for _ in range(40):
-    p.step(0.05, w._cur_sil())
+    p.step(0.05, w._sil_of)
     if p.state == "walk": break
 ck(p.state == "walk", f"turn_in 播完接 walk，实际 {p.state}")
 ck(p.state_timer > 3.0, f"walk 的 state_timer 已重设（={p.state_timer:.1f}s，不占转身时长）")
 
 # ⑤ 走到目标 → turn_out（转回正面）→ idle（⭐ goal-driven 停下那条路）
 for _ in range(600):
-    p.step(0.05, w._cur_sil())
+    p.step(0.05, w._sil_of)
     if p.state == "turn_out": break
 ck(p.state == "turn_out", f"走到目标应先进 turn_out，实际 {p.state}")
 ck(p.goal is None, "目标已清")
 for _ in range(40):
-    p.step(0.05, w._cur_sil())
+    p.step(0.05, w._sil_of)
     if p.state == "idle": break
 ck(p.state == "idle", f"turn_out 播完回 idle，实际 {p.state}")
 
@@ -64,14 +80,14 @@ ck(p.state == "idle", f"turn_out 播完回 idle，实际 {p.state}")
 p.behaviour.walk_weight = 0.0     # 计时到点会"选 idle"，此时目标未清
 p.goal = "goto"; p.goal_x = p.body.x + 500
 p.state_timer = 0.0
-p.step(0.05, w._cur_sil())
+p.step(0.05, w._sil_of)
 ck(p.state == "walk", f"目标未到不该中途转身/停下，实际 {p.state}（goal 仍激活）")
 
 # ⑦ 目标已清、走路计时到点 → turn_out
 p.behaviour.walk_weight = 0.0
 p.goal = None
 p.state_timer = 0.0
-p.step(0.05, w._cur_sil())
+p.step(0.05, w._sil_of)
 ck(p.state == "turn_out", f"无目标时走路到点应转回正面，实际 {p.state}")
 
 # ⑧ 朝左走：facing_right=False，turn_in/walk 镜像一致性（逻辑层）
@@ -92,8 +108,8 @@ p.behaviour.walk_weight = 1.0
 p.goal = None
 p.play("idle"); p._sleep_t = 10.0
 p.state_timer = 0.0
-p.step(0.05, w._cur_sil())        # _idle_pick → turn_in（此后 turn 状态清零 _sleep_t）
-for _ in range(5): p.step(0.05, w._cur_sil())
+p.step(0.05, w._sil_of)        # _idle_pick → turn_in（此后 turn 状态清零 _sleep_t）
+for _ in range(5): p.step(0.05, w._sil_of)
 ck(p._sleep_t == 0.0, f"turn 状态不累计睡眠计时（应清零，实际 {p._sleep_t}）")
 
 # ⑩ 无人值守长跑：全链路无卡死（120s）
@@ -101,10 +117,10 @@ ck(p._sleep_t == 0.0, f"turn 状态不累计睡眠计时（应清零，实际 {p
 #   本条只验走路链路，先关睡眠；睡眠链路由专项自测覆盖。
 p.behaviour.walk_weight = 0.6; p.behaviour.turn_chance = 0.35
 p.behaviour.sleep_after = (99999.0, 99999.0); p._sleep_need = 99999.0
-random.seed(7)
+random.seed(7)   # ⭐ ⑩ 单独再定一次：与前面几段的消耗量解耦
 seen = set()
 for _ in range(2400):
-    p.step(0.05, w._cur_sil())
+    p.step(0.05, w._sil_of)
     seen.add(p.state)
 need = {"turn_in", "turn_out", "walk", "idle"}
 ck(need <= seen, f"120s 内走完 idle→turn_in→walk→turn_out→idle 全链路，实际出现 {sorted(seen)}")
@@ -121,7 +137,7 @@ p._pick_goal = lambda: (setattr(p, "goal", "goto"), setattr(p, "goal_x", -5000.0
 p._idle_pick()                          # → turn_in（目标在左）
 ck(p.state == "turn_in", f"起步进 turn_in，实际 {p.state}")
 for _ in range(400):                    # 20 秒，足够走到墙边并被挡
-    p.step(0.05, w._cur_sil())
+    p.step(0.05, w._sil_of)
     if p.goal is None:
         break
 ck(p.goal is None, f"够不到的目标应被作废，实际 goal={p.goal} goal_x={getattr(p,'goal_x',None)}")

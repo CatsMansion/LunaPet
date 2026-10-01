@@ -18,14 +18,26 @@ def check(name, cond, detail=""):
 
 print("== 1. 配置 ==")
 act = pack.actions["drag"]
-check("frames=16 / loop=pingpong / anchor", act.frames==16 and act.loop=="pingpong"
-      and pack.anchor_of("drag")==(256,190), f"{act.frames},{act.loop},{pack.anchor_of('drag')}")
-check("idle anchor 不受影响", pack.anchor_of("idle")==(256,512), f"{pack.anchor_of('idle')}")
+# ⭐ 2026-10-01：anchor 判据改成【不变量】。
+#   ⛔ 旧断言抄死 (256,190)——那是"抓取点锚点"的值。但 09-30 把切动作的几何补偿
+#      整段搬到 UI 层后，这个语义已经不存在了：补偿改用「逐帧真实 bbox 的中轴/最低点」，
+#      而 anchor 统一回归【画布底边中点】。
+#   ✅ 现在断言引擎真正依赖的不变量：每动作 anchor == (画布宽//2, 画布高)。
+#      换素材、改画布尺寸都不会误报。
+check("drag frames=16 / loop=pingpong",
+      act.frames == 16 and act.loop == "pingpong", f"{act.frames},{act.loop}")
+_cw, _ch = pack.canvas_of("drag")
+check(f"drag anchor = 画布底边中点 ({_cw // 2},{_ch})",
+      pack.anchor_of("drag") == (_cw // 2, _ch), f"{pack.anchor_of('drag')}")
+_icw, _ich = pack.canvas_of("idle")
+check("idle anchor 也落在画布底边中点",
+      pack.anchor_of("idle") == (_icw // 2, _ich), f"{pack.anchor_of('idle')}")
 
 print("== 2. 状态机 ==")
 pet.play("idle"); pet.step(0.016, (0,0,512,512))
 pet.begin_drag(pet.body.x, pet.body.y)          # 与 ui.py 相同：begin 不搬 body
-check("state==drag", pet.state=="drag")
+# ⭐ 2026-10-01：拿起现在先播 drag_in（「被拿起」过渡，once），再进 drag 悬挂循环。
+check("拿起后进入 drag_in 或 drag", pet.state in ("drag_in", "drag"), f"state={pet.state}")
 pet.move_drag(960, 540)                          # 鼠标移动 → body 跟
 check("body 跟光标", abs(pet.body.x-960)<1 and abs(pet.body.y-540)<1,
       f"body=({pet.body.x:.0f},{pet.body.y:.0f})")

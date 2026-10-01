@@ -64,7 +64,9 @@ def run(n, dt=DT):
     out = []
     for _ in range(n):
         pet.state_timer = 9e9
-        pet.step(dt, w._cur_sil())
+        # ⭐ 2026-10-01：传 `_sil_of`（可调用），与 `ui._tick()` 口径一致 ——
+        #   `step()` 内部会切动作，由它按当前动作实时取轮廓。见 `core.Pet._sil_now()`。
+        pet.step(dt, w._sil_of)
         w._compensate_switch()
         out.append((pet.state, round(pet.body.y, 1)))
     return out

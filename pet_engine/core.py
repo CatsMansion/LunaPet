@@ -357,6 +357,7 @@ class Pet:
                 print(f"[地形] ⛔ 跳过一条无效配置：{_t}（{_e}）")
         self.anim: Optional[Anim] = None
         self._sil: Optional[Tuple[int, int, int, int]] = None   # ⭐ 本帧轮廓缓存（地形判定用）
+        self._sil_in = None          # ⭐ 轮廓原始入参（4 元组或 callable），见 _sil_now()
         self.jumping: bool = False                              # ⭐ 引擎驱动的抛物线跳进行中
         self.excited: bool = False                              # ⭐ 兴奋模式（激光等）→ 移动用 run
         self.state = "idle"
@@ -922,12 +923,44 @@ class Pet:
         self._force_f += (raw - self._force_f) * min(1.0, dt / max(b.tilt_force_tau, 1e-4))
         self._tilt_pendulum(dt, self._force_f)
 
-    def step(self, dt: float, silhouette: Tuple[int, int, int, int]):
-        """推进一帧：动画 + 物理 + 边界"""
+    def _sil_now(self):
+        """解析【当前正在播的动作】的屏幕轮廓。
+
+        ⭐⭐ 2026-10-01 修（`_自测_转身接线.py` ⑥ 长期偶发红，约 2/3 概率）：
+          `ui._tick()` 是在调 `step()` **之前**取轮廓的 —— 那一刻 anim 还是
+          **上一个动作**。而 `update()` 内部会 `play("walk")` 把动作换掉，
+          于是下面 clamp 拿的是**过期轮廓**。
+
+          实测（露娜：屏幕 799 宽 / user_scale 0.7328）：
+            旧轮廓 idle → 右限位 687      新轮廓 walk → 右限位 689     差 2px
+          她站在 687.75（两者之间）→ 用旧轮廓会被 clamp 拉回 687 →
+          被「卡墙」检测误判成"够不到目标" → 提前 `turn_out`，目标被清。
+          ⛔ 症状就是「目标还没走到就中途转身停下」。
+
+        ✅ 支持两种入参，向后兼容：
+          · 4 元组 `(dl, dr, dtp, dbt)` → 原样返回（旧调用方 / 自测脚本）
+          · `callable(action_name) -> 4 元组` → 按当前动作实时取（`ui` 传入）
+        """
+        s = getattr(self, "_sil_in", None)
+        if not callable(s):
+            return s
+        act = self.anim.act.name if self.anim else None
+        return s(act)
+
+    def step(self, dt: float, silhouette):
+        """推进一帧：动画 + 物理 + 边界
+
+        ⭐⭐ 2026-10-01：`silhouette` 支持两种入参 ——
+          · 4 元组：旧调用方 / 自测脚本，直接用
+          · `callable(action_name) -> 4 元组`：按【当前动作】实时取。
+        ⛔ 为什么需要可调用：见 `_sil_now()` —— `update()` 内部会换动作，
+           进 step 时取的那份轮廓到 clamp 时已经过期。
+        """
         self._last_dt = dt          # ⭐ 倾斜的滞后要用真实 dt
+        self._sil_in = silhouette   # 原始入参（元组或 callable），见 `_sil_now()`
         # ⭐⭐ 2026-10-01：缓存本帧轮廓 —— `ground_at()` 要用它算"她整个人还在不在平台上"
         #   （轮廓是屏幕像素口径，与 body.x/y 同一坐标系）
-        self._sil = silhouette
+        self._sil = self._sil_now()
         if self.anim:
             self.anim.advance(dt)
             if self.anim.finished:
@@ -973,7 +1006,12 @@ class Pet:
                     self.play("idle")
         self.update(dt)
         _x_before = self.body.x
-        self.body.clamp_to_screen(self.screen, silhouette, self.behaviour.screen_margin,
+        # ⭐⭐⭐ 2026-10-01 修：clamp 必须用【update 之后】的当前动作轮廓。
+        #   `update()` 里可能刚 `play("walk")` —— 进 step 时取的那份已经过期，
+        #   限位框差几 px 就会被下面的"卡墙"检测误判（见 `_sil_now()` 的实测数据）。
+        _sil = self._sil_now()
+        self._sil = _sil
+        self.body.clamp_to_screen(self.screen, _sil, self.behaviour.screen_margin,
                                   ground_y=self.ground_at(self.body.x))
 
         # ⭐⭐⭐ 2026-10-01 地形攀爬（Ronny：「我想要**往上爬**的动作」）

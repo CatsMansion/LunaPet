@@ -43,7 +43,10 @@ def move_local(pt):
 print("=== ① 睡着时【只按下不移动】→ 松手应走 sleep_out（不是瞬移 default）===")
 w.pet.fall_asleep()
 for _ in range(400):
-    w.pet.step(0.05, w._cur_sil())          # 推进到 sleep_loop
+    # ⭐ 2026-10-01：传 `_sil_of`（可调用）而不是 `_cur_sil()`（取好的元组）。
+    #   `step()` 内部会切动作，由它按当前动作实时取轮廓 —— 与 `ui._tick()` 一致。
+    #   见 `core.Pet._sil_now()`。
+    w.pet.step(0.05, w._sil_of)          # 推进到 sleep_loop
 ck(w.pet.asleep, f"先确认睡着了 state={w.pet.state}")
 press_local()
 ck(not w.pet.dragging, "按下后【没有】立即进入拖拽（旧 bug 就是这里进去了）")
@@ -54,15 +57,17 @@ ck(not w.pet.asleep, "asleep 已清")
 
 print("\n=== ② 睡着时【真拖拽】→ 应进 drag，松手 fall ===")
 w.pet.play("idle"); w.pet.fall_asleep()
-for _ in range(400): w.pet.step(0.05, w._cur_sil())
+for _ in range(400): w.pet.step(0.05, w._sil_of)
 ck(w.pet.asleep, f"又睡着了 state={w.pet.state}")
 press_local()
 move_local(QPoint(w.width()//2 + 40, w.height()//2))
 ck(w.pet.dragging, "移动超阈值后进入拖拽")
-ck(w.pet.state == "drag", f"state={w.pet.state}")
+# ⭐ 2026-10-01：拿起现在先播 drag_in（「被拿起」过渡），再进 drag 悬挂循环。
+ck(w.pet.state in ("drag_in", "drag"), f"state={w.pet.state}")
 release_local()
 ck(not w.pet.dragging, "松手后不再拖拽")
-ck(w.pet.state == "fall", f"松手进入 fall，实际 {w.pet.state}")
+# ⭐ 2026-10-01：松手是 drag_out（展开过渡）→ fall 两段。
+ck(w.pet.state in ("drag_out", "fall"), f"松手进入下落，实际 {w.pet.state}")
 
 print("\n=== ③ 没睡着时点击 → 摸摸（pat），不是叫醒 ===")
 w.pet.play("idle"); w.pet.asleep = False
@@ -73,7 +78,7 @@ print("\n=== ④ 光标靠近能吵醒（全局轮询）===")
 # ⛔ 首跑教训：③ 里 press/release 用 mapToGlobal 喂了光标（就在她身上）→ 她"一入睡就被吵醒"
 #    ——那其实证明唤醒逻辑是对的。这里先清光标模拟"鼠标不在旁边"，再分段验证。
 w.pet.play("idle"); w.pet._cursor_x = None; w.pet.fall_asleep()
-for _ in range(400): w.pet.step(0.05, w._cur_sil())
+for _ in range(400): w.pet.step(0.05, w._sil_of)
 ck(w.pet.asleep, f"睡着了 state={w.pet.state}")
 w._feed_cursor()            # 直接测轮询函数（离屏下 QCursor.pos() 取不到真实位置）
 ck(w.pet._cursor_x is not None, f"光标已喂进去 _cursor_x={w.pet._cursor_x}")

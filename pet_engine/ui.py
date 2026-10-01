@@ -280,6 +280,19 @@ class PetWindow(QWidget):
         act = self.pet.anim.act.name if self.pet.anim else None
         return self.pack.anchor_of(act) if act else self.pack.anchor
 
+    def _sil_of(self, action_name) -> Tuple[int, int, int, int]:
+        """⭐ 按【动作名】取屏幕轮廓（已乘 user_scale）。
+
+        ⭐⭐ 2026-10-01 新增：把"取轮廓"从"当前 anim"解耦出来，
+           因为 `core.step()` 需要按**它内部刚切过去的动作**取 ——
+           见 `core.Pet._sil_now()`（那里记录了 clamp 用过期轮廓的实测数据）。
+        """
+        sil = self.sils[action_name] if (action_name and action_name in self.sils) else self.sil
+        s = self.user_scale
+        if abs(s - 1.0) < 1e-3:
+            return sil
+        return (int(sil[0] * s), int(sil[1] * s), int(sil[2] * s), int(sil[3] * s))
+
     def _cur_sil(self) -> Tuple[int, int, int, int]:
         """⭐ 当前动作的轮廓（横画幅趴姿宽度大，必须用自己的）
 
@@ -287,13 +300,12 @@ class PetWindow(QWidget):
            轮廓是**屏幕像素**口径（core 拿它做 clamp_to_screen 限位），
            若显示只有 73% 而轮廓仍是 100%，限位框就比实际大 36% →
            她能半个身子走出屏幕。同 `_apply_pos` / `paintEvent` 统一口径。
+
+        ⚠️ 2026-10-01：按 **anim 的动作名**取 —— 调 `step()` **之前**调用时，
+           anim 还是上一个动作。要给 core 用于 clamp，请传 `self._sil_of`
+           （可调用），别传这个元组。
         """
-        act = self.pet.anim.act.name if self.pet.anim else None
-        sil = self.sils[act] if (act and act in self.sils) else self.sil
-        s = self.user_scale
-        if abs(s - 1.0) < 1e-3:
-            return sil
-        return (int(sil[0] * s), int(sil[1] * s), int(sil[2] * s), int(sil[3] * s))
+        return self._sil_of(self.pet.anim.act.name if self.pet.anim else None)
 
     def _compensate_switch(self):
         """⭐⭐ 切动作时让【角色在屏幕上的位置】不跳（2026-09-30）
@@ -699,7 +711,11 @@ class PetWindow(QWidget):
         # ⭐⭐ 2026-09-29 激光笔驱动（她追红点 / 追到就跳起来抓）
         self._laser_tick(dt)
         # ⭐ 先按【上一帧动作】的轮廓推进物理
-        self.pet.step(dt, self._cur_sil())
+        # ⭐⭐ 2026-10-01：传【可调用】而不是取好的元组 ——
+        #   `step()` 内部可能切动作（如 play("walk")），由它按当前动作实时取轮廓。
+        #   ⛔ 传元组会让 clamp 用上一个动作的限位框，差几 px 就被"卡墙"检测误判
+        #      → 目标没走到就提前 turn_out。见 `core.Pet._sil_now()`。
+        self.pet.step(dt, self._sil_of)
         # ⭐⭐ 切动作 → 先按【真实画面位置】补偿，让角色在屏幕上不跳
         self._compensate_switch()
         # ⭐ 动作可能刚切换 → 换尺寸。
