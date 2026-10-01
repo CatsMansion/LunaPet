@@ -32,6 +32,9 @@ def check(label, cond, detail=""):
 app = QApplication.instance() or QApplication(sys.argv)
 pack = load_pack(os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs", "luna"))
 w = PetWindow(pack)
+# ⭐ 2026-10-01：本测试只管互动，关掉地形 —— offscreen 屏幕只有 800x800，
+#    地形会横在屏幕中间，她走过去会被拉去爬墙，干扰走路类断言。
+w.pet.terrains = []
 
 n_ok = 0
 print("=== ⭐ 点击 = 摸摸（合成真实鼠标事件）===")

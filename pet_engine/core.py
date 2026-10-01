@@ -112,12 +112,47 @@ class Behaviour:
     #   为什么单列一个数：这是**角色设定**（猫的兴奋程度/体能），不是引擎常数。
     #   以后放到角色包里，一只猫一个值 —— 同样的红点，慢猫和快猫反应不一样。
     laser_speed_mul: float = 2.5
+    # ⭐⭐ 2026-10-01 Ronny：「run 的移速为 **walk 的 5 倍**」
+    run_speed_mul: float = 5.0
     # ⭐⭐ 睡眠（2026-09-26）：连续待机多久睡着 → 睡着 → 叫醒 → 伸懒腰
     sleep_after: Tuple[float, float] = (40.0, 90.0)   # 连续无互动多久入睡（秒，随机区间）
     sleep_mood_decay_scale: float = 0.2               # 睡着时好感度衰减倍率（睡得香，掉得慢）
     wake_radius: float = 120.0                        # 光标靠近多少 px 会把她吵醒
     stretch_chance: float = 0.6                       # 醒来后做伸懒腰的概率
     sleep_wakeup_need: float = 1.0                    # 摇几下才醒（拖拽时）——预留
+
+
+# ⭐ 地形边缘余量：脚底中点可以越出平台边这么多 px，才判"没有支撑"
+#   取值 ≈ idle 的横向半宽（实测 右轮廓 +112 / 左 −79）→ 让她"整个人基本离开平台"才掉。
+#   ⛔ 不要用当前动作的轮廓：那个每帧随动作变（fall ≠ idle），边缘阈值会抖。
+#   ⭐ 可在 pet.json 的每个地形项里用 `edge_tol` 单独覆盖。
+TERRAIN_EDGE_TOL = 200.0
+
+
+def _resolve_terrain(t: dict, screen: Tuple[int, int, int, int]) -> dict:
+    """把地形配置解析成**绝对屏幕坐标**。
+
+    ⭐ 三种写法：
+         x0:-420  → sr - 420        （负值 = 从右 / 下边往里量，自适应屏幕尺寸）
+         x0: 100  → sl + 100        （正值 = 从左上角往外量）
+         x1:"right" / y1:"bottom"   （⭐ 保留字 = 直接贴到那条边）
+    """
+    sl, st, sr, sb = screen
+    EDGE = {"left": sl, "right": sr, "top": st, "bottom": sb}
+
+    def v(key, pos_base, neg_base):
+        raw = t[key]
+        if isinstance(raw, str):
+            return float(EDGE.get(raw.lower(),
+                                  {"x0": sl, "x1": sr, "y0": st, "y1": sb}[key]))
+        raw = float(raw)
+        return neg_base + raw if raw < 0 else pos_base + raw
+
+    return {"x0": v("x0", sl, sr), "y0": v("y0", st, sb),
+            "x1": v("x1", sl, sr), "y1": v("y1", st, sb),
+            # ⭐ 边缘余量：没配就用全局默认（⛔ 显式带过来，否则被这里丢掉）
+            "edge_tol": float(t.get("edge_tol") or TERRAIN_EDGE_TOL),
+            "label": t.get("label", "猫爬架")}
 
 
 @dataclass
@@ -133,6 +168,9 @@ class PetPack:
     #   不是引擎常数。⛔ 此前它被硬编码在 ui.py 里（0.45*(1/0.85)^3），
     #   调大小必须改代码，而且让所有 anchor×s 的算式带上非整数倍。
     display_scale: float = 1.0
+    # ⭐⭐ 2026-10-01「地形」：可站立的平台列表，每项 {'x0','y0','x1','y1'}（屏幕坐标，y0=平台顶）。
+    #   来自 pet.json 的 `terrain`。⛔ 为空 = 只有屏幕底可站（旧的默认行为，向后兼容）。
+    terrains: Optional[list] = None
 
     def frame_path(self, action: str, idx: int) -> str:
         return os.path.join(self.root, "action", f"{action}_{idx}.png")
@@ -200,6 +238,7 @@ def load_pack(folder: str) -> PetPack:
         screen_margin=int(b.get("screen_margin", 0)),
         walk_speed=float(b.get("walk_speed", 1.0)),
         laser_speed_mul=float(b.get("laser_speed_mul", 2.5)),
+        run_speed_mul=float(b.get("run_speed_mul", 5.0)),
         sleep_after=tuple(b.get("sleep_after", (40.0, 90.0))),
         sleep_mood_decay_scale=float(b.get("sleep_mood_decay_scale", 0.2)),
         wake_radius=float(b.get("wake_radius", 120.0)),
@@ -210,7 +249,8 @@ def load_pack(folder: str) -> PetPack:
                    canvas=tuple(d.get("canvas", (512, 512))),
                    anchor=tuple(d.get("anchor", (256, 512))),
                    actions=acts, behaviour=beh, scale=float(d.get("scale", 1.0)),
-                   display_scale=float(d.get("display_scale", 1.0)))
+                   display_scale=float(d.get("display_scale", 1.0)),
+                   terrains=list(d["terrain"]) if d.get("terrain") else None)
 
 
 # ============================================================================
@@ -258,12 +298,17 @@ class Body:
     tilt: float = 0.0       # ⭐ 当前倾角（度）
 
     def clamp_to_screen(self, screen: Tuple[int, int, int, int],
-                        silhouette: Tuple[int, int, int, int], margin: int = 0):
+                        silhouette: Tuple[int, int, int, int], margin: int = 0,
+                        ground_y: Optional[float] = None):
         """⭐ 按【角色实际轮廓】限位（不是按窗口中心 —— 那是 DyberPet 的坑）
 
         screen      = (left, top, right, bottom) 桌面可用区
         silhouette  = (dx_left, dx_right, dy_top, dy_bottom)
                       角色轮廓相对"脚底中点"的四向偏移
+        ground_y    = ⭐⭐ 本帧"她脚下的地面高度"（屏幕 y）。
+                      ⛔ 默认 None = 屏幕底。
+                      ✅ 传了就是【地形】：站在猫爬架平台上时，地面是平台顶而不是屏幕底。
+                        这是 2026-10-01 新增的「地形」机制的落地接口 —— 见 `Pet.ground_at()`。
         """
         sl, st, sr, sb = screen
         dl, dr, dtp, dbt = silhouette
@@ -271,8 +316,9 @@ class Body:
         self.x = max(self.x, float(sl - dl + margin))
         # 右：脚底 x + dr 不能大于 sr
         self.x = min(self.x, float(sr - dr - margin))
-        # 下：脚底 y 不能超过屏幕底
-        bottom_limit = float(sb - dbt)
+        # 下：脚底 y 不能超过【地面】（默认屏幕底；有地形时是平台顶）
+        floor = float(sb) if ground_y is None else float(ground_y)
+        bottom_limit = float(floor - dbt)
         if self.y > bottom_limit:
             self.y = bottom_limit
             self.vy = 0.0
@@ -298,7 +344,21 @@ class Pet:
         self.body = Body()
         self.body.x = (screen[0] + screen[2]) / 2
         self.body.y = float(screen[3])
+        # ⭐⭐⭐ 2026-10-01「地形」—— Ronny：「猫爬架**就是个地形**，默认在屏幕右端，
+        #   最好可以让玩家进行自定义」。每项 {'x0','y0','x1','y1'}（屏幕坐标，y0 = 平台顶）。
+        #   ⛔ P0 只做"可站立的矩形平台"：她走进平台范围就站到平台顶，走出去就自由落体。
+        #   ⭐ pet.json 里可以写**负值**表示"从右/下边算"（如 x0:-420 = 右边距 420），
+        #      这样换显示器/改分辨率不用重配。
+        self.terrains: List[dict] = []
+        for _t in (getattr(pack, "terrains", None) or []):
+            try:
+                self.terrains.append(_resolve_terrain(_t, screen))
+            except (KeyError, TypeError, ValueError) as _e:
+                print(f"[地形] ⛔ 跳过一条无效配置：{_t}（{_e}）")
         self.anim: Optional[Anim] = None
+        self._sil: Optional[Tuple[int, int, int, int]] = None   # ⭐ 本帧轮廓缓存（地形判定用）
+        self.jumping: bool = False                              # ⭐ 引擎驱动的抛物线跳进行中
+        self.excited: bool = False                              # ⭐ 兴奋模式（激光等）→ 移动用 run
         self.state = "idle"
         self.facing_right = True
         self.state_timer = random.uniform(*self.behaviour.idle_duration)
@@ -546,7 +606,8 @@ class Pet:
            ② 只在【从非走路状态进入走路】时才考虑换向，且只以 `turn_chance` 的概率翻
         """
         b = self.behaviour
-        if random.random() < b.walk_weight and "walk" in self.pack.actions:
+        _loc = self._loco_act()
+        if random.random() < b.walk_weight and _loc in self.pack.actions:
             # ⭐ v0.2：不是原地走，而是"挑个地方走过去"
             self._pick_goal()
             # ⭐ 只在"从别的状态进入走路"时才决定朝向；走路中续期则保持原方向
@@ -563,7 +624,7 @@ class Pet:
                     self.facing_right = self.goal_x > self.body.x   # 转向 = 起步方向
                 self.play("turn_in")
                 return                                              # state_timer 由 turn_in 播完重设
-            self.play("walk")
+            self.play_walk()
             self.state_timer = random.uniform(*b.walk_duration)   # ⭐ 必定重设
         else:
             # ⭐⭐ 2026-09-28 转身接线：走路结束 → 先转回正面（turn_out）再 idle
@@ -571,7 +632,7 @@ class Pet:
             #   ⛔ 目标还没走到、走路计时先到点 → 继续走完，【不能中途停下转身】
             #     （否则"转身回正面 0.96s → 又马上侧身继续走"，两截动作反复横跳）
             if self.state == "walk" and self.goal is not None:
-                self.play("walk")
+                self.play_walk()
                 self.state_timer = random.uniform(*b.walk_duration)
                 return
             if self.state == "walk" and self._has("turn_out"):
@@ -579,6 +640,163 @@ class Pet:
                 return                                             # 播完由 step() 接 idle
             self.play("idle")
             self.state_timer = random.uniform(*b.idle_duration)   # ⭐ 必定重设
+
+    # ---------- ⭐⭐ 地形（2026-10-01）----------
+    def ground_at(self, x: float, y: Optional[float] = None) -> float:
+        """本帧"她脚下的地面高度"（屏幕 y）。
+
+        ⭐ 默认 = 屏幕底；站在地形平台范围内时 = 平台顶。
+        ⛔ 取**最高的**那个平台顶（min y），叠放平台也能正确处理。
+
+        ⭐⭐ 2026-10-01 关键修正（Ronny：「等她溜达到屏幕右边 → **会瞬移到平台上**」）：
+            ⛔ 旧版只看 x：「走进平台范围就吸附到平台顶」→ 她从平台✔侧面走过去时
+               **瞬间被弹到平台顶**，像瞬移。
+            ✅ 现在要**同时满足**：x 在范围内 **且** 脚底已经在平台顶附近（不低太多）。
+               她在平台**下方**时，平台不当她的地面 → 她会撞在平台侧面上（而不是被弹上去），
+               改由 `_terrain_climb()` 触发**攀爬**。
+        """
+        g = float(self.screen[3])
+        if y is None:
+            y = self.body.y
+        # ⭐ 她的横向占位。⛔ 不用当前动作的轮廓（每帧随动作变 → 边缘阈值抖，
+        #   实测在 fall/idle 切换处 `on_ground` 来回抖了两帧）→ 用固定容差。
+        for t in self.terrains:
+            try:
+                x0, top, x1 = float(t["x0"]), float(t["y0"]), float(t["x1"])
+                tol = float(t.get("edge_tol", TERRAIN_EDGE_TOL))
+            except (KeyError, TypeError, ValueError):
+                continue
+            # ⭐⭐ 2026-10-01 修（Ronny：「我的意思是**还没到边缘**就开始播 fall 了」）：
+            #   ⛔ 旧判据只用"脚底中点" —— 她**中点在边缘上**（身体大半还在平台上、
+            #      右脚离边缘还有 200 多 px）就开始掉，看起来就是"没到边缘就掉了"。
+            #   ✅ 往外留 `edge_tol` 的余量：**整个人基本离开平台**才判悬空。
+            #      ⭐ 这个值可在 pet.json 里按地形单独调（`edge_tol`），不用改代码。
+            if x + tol < x0 or x - tol > x1:
+                continue
+            # ⭐ 只有脚底"已经到平台顶附近或更高"时，平台才算她的地面（容差 4px）
+            if y <= top + 4.0:
+                g = min(g, top)
+        return g
+
+    # ---------- ⭐⭐ 地形攀爬（2026-10-01）----------
+    def _terrain_climb(self, dt: float):
+        """撞到地形侧面 → 往上爬。
+
+        ⭐ Ronny：「我想要**往上爬**的动作」（对应 P0 的"瞬移到平台上"）
+        ⛔ 素材 `climb` 还没装机时：她停在平台边缘**不动**（不是被弹上去），
+           等素材到位后自动走这条路径 —— 不需要再改代码。
+        """
+        if self.dragging or not self.body.on_ground:
+            return False
+        if self.state in ("climb", "fall", "land", "land_settle",
+                          "drag", "drag_in", "drag_out"):
+            return False
+        for t in self.terrains:
+            try:
+                x0, top, x1 = float(t["x0"]), float(t["y0"]), float(t["x1"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # 她的水平位置已经进入平台范围，但脚底还在平台顶下方 → 该爬
+            if x0 <= self.body.x <= x1 and self.body.y > top + 4.0:
+                # ⭐⭐ 只有 climb 素材**真的装机了**才启用爬升。
+                #   ⛔ 没有素材时**什么都不做** —— 不要在这里 play("idle") 或清 goal：
+                #      那样会每帧打断她的状态机（实测：她会被永久卡住不动，
+                #      因为地形窗口在她上方、看起来只是"被挡住"，是 P0 可接受的表现）。
+                #      （`_自测_互动.py` 就因此从 11/11 掉到 9/11）
+                if not self._has("climb"):
+                    return False
+                # ⭐⭐ 2026-10-01 Ronny：「爬墙**不一定非要爬到顶**，可以爬到
+                #   **头和小红点一样高**的时候跳」→ 爬升终点不再恒为平台顶：
+                #     取「平台顶 top」与「让**头顶**与红点等高的位置」中**较低的**那个
+                #     （屏幕 y 越大越低）—— 即 max(top, head_stop)。
+                #     · 不能爬过平台顶（上面没东西可抓）→ 以 top 为上限
+                #     · 红点在她头顶之上时，爬到"头顶刚好与红点齐平"即可起跳
+                #   ⛔ 只在兴奋态（激光）下这么做；普通爬平台仍爬到顶。
+                #   ⛔ 若红点**不在她头顶之上**（_head_stop 不低于她现在的高度）→ 不据此提前停，
+                #      仍按平台顶爬（否则 climb_speed 会退化成原地爬）。
+                _stop = top
+                _dy = getattr(self, "_laser_pos_y", None)     # ⭐ 由 ui 的激光驱动每帧写入
+                if self.excited and _dy is not None:
+                    _sil = self._sil or (0, 0, -1, 0)
+                    _head_stop = float(_dy) + abs(float(_sil[2]))   # 头顶与红点等高时 body.y 应到哪
+                    if _head_stop < self.body.y - 4.0:
+                        _stop = max(top, _head_stop)
+                self.goal = None
+                self.play("climb")
+                self._climb_top = _stop
+                self.climb_speed = max(60.0, (self.body.y - _stop) / 1.33)   # ⭐ 与素材节奏对齐（16 帧 @12fps）
+                return True
+        return False
+
+    # ---------- ⭐⭐ 抛物线跳跃（2026-10-01）----------
+    def jump_to(self, height: float, dx: float = 0.0) -> bool:
+        """往上跳 height 像素、同时水平移动 dx 像素，按**二次函数轨迹**落下来。
+
+        ⭐⭐ Ronny 2026-10-01：「我要的跳是那种**往上几百像素的位移**，
+           然后保持**二次函数的轨迹 fall 下来**」
+        ⭐ 追加：「高度**不要固定**，要去追鼠标，而且最好能进行**大约 150px 的斜向位移**」
+
+        ⭐ 物理上就是这么简单：给一个向上的初速度 v0 = √(2gh) + 一个水平速度 vx，
+           而 `update()` 里本来就有重力（`vy += g·dt` + `y += vy·dt`）——
+           两者合起来**天然就是抛物线**，不需要任何额外插值。
+
+        ⛔ 素材只管**姿势**（蹲/起跳/空中/落地），**整体位移由这里控** ——
+           这是项目铁律（Ronny：「净上升为 0 就是我们要的，位置由引擎控」）。
+        """
+        if not self.body.on_ground or self.dragging:
+            return False
+        h = max(0.0, float(height))
+        if h <= 1.0:
+            return False
+        self.body.vy = -math.sqrt(2.0 * self.behaviour.gravity * h)
+        # ⭐ 水平速度：让 dx 在**飞行时间内**均匀走完（飞行时间由高度决定）
+        t_flight = 2.0 * math.sqrt(2.0 * h / self.behaviour.gravity)
+        self.body.vx = (float(dx) / t_flight) if t_flight > 1e-6 else 0.0
+        self.body.on_ground = False
+        self.jumping = True          # ⭐ 跳跃期间跳过"支撑检查"（否则会被判悬空、播 fall）
+        # ⭐⭐ Ronny 2026-10-01：「只播放**上半程和刚落下的 1/2**，落下的**最后 1/2 程用 fall**」
+        #   → 记下飞行总时长和已飞时间，按**进度**在 75% 处把动画切成 fall。
+        self._jump_total = self.jump_flight_time(h)
+        self._jump_t = 0.0
+        self._jump_switched = False
+        return True
+
+    def _jumping(self) -> bool:
+        """是否处于引擎驱动的跳跃中"""
+        return bool(getattr(self, "jumping", False))
+
+    def jump_flight_time(self, height: float) -> float:
+        """跳 height 高再落回原高度所用的时间（用来配素材时长/fps）"""
+        h = max(0.0, float(height))
+        if h <= 1.0:
+            return 0.0
+        return 2.0 * math.sqrt(2.0 * h / self.behaviour.gravity)
+
+    # ---------- ⭐⭐ 兴奋模式 / 移动动作选择（2026-10-01）----------
+    def _loco_act(self) -> str:
+        """当前"移动"该用哪个**素材**：兴奋态且有 `human_run` 素材时用它，否则 `walk`。
+
+        ⭐ Ronny 2026-10-01：「新增**兴奋模式**，在激光模式下**不再 walk 改为 run**」
+        ⭐ 同日更正：「（四足版）有点像**猩猩**，先不要启用，把这个动作记为**猩猩跑**」
+           → 等真正的**人类跑**（`human_run`）到位再启用。
+        ⛔ 状态名仍然是 `walk`（状态机只认 walk）—— 变的只是**播哪个素材**，
+           这样 turn_in / turn_out 的接力、走路计时、速度缓动全都不用动。
+        """
+        if getattr(self, "excited", False) and "human_run" in self.pack.actions:
+            return "human_run"
+        return "walk"
+
+    def play_walk(self):
+        """播当前的移动素材（walk 或 run），但**状态名固定回 `walk`**"""
+        name = self._loco_act()
+        self.play(name)
+        self.state = "walk"
+
+    def set_excited(self, on: bool):
+        """兴奋模式开关（激光等刺激场景）。⭐ 关掉时如果正在跑，立刻换回走路素材。"""
+        self.excited = bool(on)
+        if not self.excited and self.anim and self.anim.act.name == "run":
+            self.play_walk()
 
     # ---------- 物理 ----------
     def update(self, dt: float):
@@ -591,6 +809,10 @@ class Pet:
         if not self.body.on_ground:
             self.body.vy += b.gravity * dt
             self.body.y += self.body.vy * dt
+            # ⭐⭐ 2026-10-01：空中也走水平速度 —— 抛物线跳要能"斜着跳"过去
+            #   （Ronny：「最好能进行大约 150px 的斜向位移」）
+            if abs(self.body.vx) > 0.01:
+                self.body.x += self.body.vx * dt
 
         # ⭐⭐ v0.2：好感度自然衰减 + 爱心飘动计时（睡着时掉得慢 → "睡得香"）
         self.mood = max(0.0, self.mood - b.mood_decay * dt
@@ -628,7 +850,7 @@ class Pet:
             else:
                 self.facing_right = self.goal_x > self.body.x
                 if self.state != "walk":
-                    self.play("walk")
+                    self.play_walk()
 
         # 被摸计时
         if self._pat_t > 0:
@@ -638,12 +860,18 @@ class Pet:
                 self.state_timer = random.uniform(*b.idle_duration)
 
         # 走路位移：⭐ 由 stride_px 推出的每帧位移 × 该帧播放速度
-        if self.state == "walk":
-            act = self.pack.actions["walk"]
-            # ⭐⭐ 2026-09-29 Ronny：追激光红点时移速暴增至 laser_speed_mul 倍
-            #   （露娜 = 2.5。她看到红点会兴奋地扑过去，不是平常散步的速度）
-            #   ⛔ 只对 seek（追红点）生效，普通漫游 goto 不受影响。
-            _mul = b.laser_speed_mul if self.goal == "seek" else 1.0
+        if self.state == "walk" and self.anim:
+            # ⭐⭐ 2026-10-01：速度按**实际在播的素材**算（兴奋态播的是 human_run）
+            _lname = self.anim.act.name if self.anim.act.name in ("walk", "human_run") else "walk"
+            act = self.pack.actions[_lname]
+            if _lname == "human_run":
+                # ⭐ Ronny：「run 的移速为 **walk 的 5 倍**」
+                _mul = b.run_speed_mul
+            else:
+                # ⭐⭐ 2026-09-29 Ronny：追激光红点时移速暴增至 laser_speed_mul 倍
+                #   （露娜 = 2.5。她看到红点会兴奋地扑过去，不是平常散步的速度）
+                #   ⛔ 只对 seek（追红点）生效，普通漫游 goto 不受影响。
+                _mul = b.laser_speed_mul if self.goal == "seek" else 1.0
             spd = act.move_per_frame * act.fps * b.walk_speed * _mul   # px/s
             tgt = spd * (1.0 if self.facing_right else -1.0)
             # ⭐⭐ 掉头缓动：换向时速度平滑过零（减速 → 微顿 → 反向加速）
@@ -697,6 +925,9 @@ class Pet:
     def step(self, dt: float, silhouette: Tuple[int, int, int, int]):
         """推进一帧：动画 + 物理 + 边界"""
         self._last_dt = dt          # ⭐ 倾斜的滞后要用真实 dt
+        # ⭐⭐ 2026-10-01：缓存本帧轮廓 —— `ground_at()` 要用它算"她整个人还在不在平台上"
+        #   （轮廓是屏幕像素口径，与 body.x/y 同一坐标系）
+        self._sil = silhouette
         if self.anim:
             self.anim.advance(dt)
             if self.anim.finished:
@@ -727,7 +958,7 @@ class Pet:
                 elif self.state == "turn_in":
                     # ⭐⭐ 2026-09-28 转身接线：正面 → 侧身（朝向已定），现在起步走
                     #   （state_timer 在这里才重设，turn_in 的时长不占 walk_duration）
-                    self.play("walk")
+                    self.play_walk()
                     self.state_timer = random.uniform(*self.behaviour.walk_duration)
                 elif self.state == "turn_out":
                     # ⭐⭐ 转身接线：侧身 → 正面，收工回 idle
@@ -742,7 +973,125 @@ class Pet:
                     self.play("idle")
         self.update(dt)
         _x_before = self.body.x
-        self.body.clamp_to_screen(self.screen, silhouette, self.behaviour.screen_margin)
+        self.body.clamp_to_screen(self.screen, silhouette, self.behaviour.screen_margin,
+                                  ground_y=self.ground_at(self.body.x))
+
+        # ⭐⭐⭐ 2026-10-01 地形攀爬（Ronny：「我想要**往上爬**的动作」）
+        #   ⛔ 旧版是"走进平台范围 → 瞬间吸附到平台顶" = 瞬移
+        #   ✅ 现在：撞到平台侧面 → 播 climb，逐帧把 body.y 抬到平台顶 → 站定
+        #   ⛔ climb 素材没装机时：停在边缘不动（不弹上去），素材到位自动生效
+        if self.state == "climb":
+            # ⛔⛔ 爬墙时**不能有重力**：她在贴墙爬，不是自由落体。
+            #   实测漏了这条时，重力每帧把她往下拽，和爬升速度对抗 →
+            #   她在 2128~2152 之间来回晃、永远爬不上去。
+            self.body.vy = 0.0
+            self.body.on_ground = True
+            _top = getattr(self, "_climb_top", None)
+            _spd = getattr(self, "climb_speed", 300.0)
+            self.body.y -= _spd * dt
+            if _top is not None and self.body.y <= float(_top):
+                self.body.y = float(_top)
+                self.body.on_ground = True
+                # ⭐⭐ 2026-10-01 Ronny：「在高处玩激光会在爬行和跳之间穿插 idle，
+                #   ⛔ 不要穿插 idle，**直接爬完就跳**」
+                #   → 兴奋态（激光等）下：爬到顶立刻起跳；否则才回 idle。
+                if getattr(self, "excited", False):
+                    self.play("jump_excited" if "jump_excited" in self.pack.actions
+                              else "jump" if "jump" in self.pack.actions else "idle")
+                    # ⭐⭐ Ronny：「先爬墙**再朝着小红点跳**」→ 跳跃的水平方向朝红点
+                    #   （`_laser_pos_x` 由 ui 的激光驱动每帧写入；没有就朝她当时面向）
+                    _lx = getattr(self, "_laser_pos_x", None)
+                    _dx = 0.0
+                    if _lx is not None:
+                        # ⭐⭐ 2026-10-01 Ronny：横向起跳抓红点的距离 150 → **800**
+                        #   （同 ui 的"够近就抓"那处；爬完起跳也是"朝红点扑"，口径要一致）
+                        _dx = max(-800.0, min(800.0, float(_lx) - self.body.x))
+                    # 跳的高度用**头顶**对目标（同激光接线：顶端去够，不是脚底）
+                    self.jump_to(float(getattr(self, "_climb_jump_h", 220.0)), _dx)
+                else:
+                    self.play("idle")
+                    self.state_timer = random.uniform(*self.behaviour.idle_duration)
+        else:
+            self._terrain_climb(dt)
+
+        # ⭐⭐ 2026-10-01 抛物线跳的「动画时序」（Ronny：「只播放**上半程和刚落下的 1/2**，
+        #   落下的**最后 1/2 程用 fall**」）
+        #   → 按**飞行进度**切：前 75%（上升 + 下落前半）用 jump 素材，
+        #     超过 75% 就换成 fall 的下落姿势。抛物线本身不受影响，只换姿势。
+        if self.jumping:
+            self._jump_t = getattr(self, "_jump_t", 0.0) + dt
+            _tot = getattr(self, "_jump_total", 0.0)
+            if (not getattr(self, "_jump_switched", False) and _tot > 0
+                    and self._jump_t >= _tot * 0.75):
+                # 下落后半程 → 换成下落姿势
+                if self._has("fall") and self.state != "fall":
+                    self.play("fall")
+                self._jump_switched = True
+            elif (not getattr(self, "_jump_switched", False) and self.anim
+                  and self.anim.act.name in ("jump", "jump_excited")):
+                # ⭐⭐ Ronny 2026-10-01：「起跳动画本身循环可以，就是**加速播放塞进前面的时间里**」
+                #   → 不用素材自己的 fps，改成**按飞行进度映射帧号**：
+                #     进度 0~75% 正好把素材从头到尾跑一遍（= 加速）。
+                n = len(self.anim.seq)
+                if n > 1 and _tot > 0:
+                    prog = min(0.9999, max(0.0, self._jump_t / (_tot * 0.75)))
+                    self.anim.i = int(prog * n)
+                    # ⛔⛔ 必须同时清掉 finished —— `advance()` 可能已经把帧号推到末尾并
+                    #   置 finished=True，下一帧 `step()` 的"播完分支"就会**插一个 idle 进来**
+                    #   （实测：跳跃中空中播 idle 两帧，看起来就是"在空中走路"）。
+                    self.anim.finished = False
+            if self.body.on_ground:          # 落地 → 跳跃结束
+                self.jumping = False
+                self._jump_switched = False
+                self.body.vx = 0.0           # ⭐ 水平速度也清零，别让她落地后继续滑
+
+        # ⭐⭐⭐ 2026-10-01 地形的「支撑检查」（⛔ 爬墙期间跳过：那时候"有没有地面"
+        #   不适用，她在墙上；跑这段会把她判成悬空 → 启动重力 → 爬升被拽回去）
+        #   ⛔ 原来 `on_ground` 只在【落地】那一刻被设 True（clamp_to_screen 里），
+        #      而**没有任何地方在"脚下没有支撑"时把它设回 False** ——
+        #      于是她走出地形平台边缘后，人悬在半空、也不下落。
+        #      （Ronny 实测：「如果她站在平台上，左右走会悬空，没有往下位移的动作」）
+        #   ✅ 每帧问一次"脚下那块地面还在不在"：
+        #        脚底【高于】地面 → 悬空 → 交给重力，并接 fall 动作（他说"其实下落就能用"）
+        #        否则 → 踩实
+        #   ⛔ 拖拽中不判（那时候她的高度由鼠标决定，`end_drag` 已经设过 on_ground=False）
+        if not self.dragging and self.state != "climb" and not self._jumping():
+            if self.body.y < self.ground_at(self.body.x) - 0.5:
+                # ⭐⭐ 物理状态**无条件**更新（下落的物理前提）。
+                #   ⛔ 上一版把 "jump"/"jump_excited" 塞进下面的"排除列表"，
+                #      结果整段不执行 —— 连 `on_ground = False` 都没设，
+                #      她站在平台边缘外**不下落**（实测 y 恒定不变）。
+                #   ✅ 拆开：物理照常，"播什么姿势"单独判。
+                if self.body.on_ground:
+                    self.body.on_ground = False
+                    self.body.vy = 0.0
+                # ── 播什么姿势 ──
+                if (self.state not in ("fall", "land", "land_settle", "climb",
+                                       "drag", "drag_in", "drag_out",
+                                       "jump", "jump_excited")
+                        and getattr(self, "_fall_delay", 0.0) <= 0.0):
+                    # ⭐⭐ 2026-10-01 Ronny：「从高处下来**只 fall 改为先跳再 fall**」
+                    #   落差够大（比如从地形平台顶掉下来）→ 先播起跳姿势一小段，
+                    #   再由下面的 `_fall_delay` 切到 fall。
+                    _drop = self.ground_at(self.body.x) - self.body.y
+                    if _drop > 60.0 and self._has("jump"):
+                        self.play("jump")
+                        self._fall_delay = 0.35
+                    else:
+                        self.play("fall")
+            else:
+                self.body.on_ground = True
+                self.jumping = False      # ⭐ 踩到地面 → 跳跃结束
+
+        # ⭐ 离台"先跳再 fall"的延时切换
+        _fd = getattr(self, "_fall_delay", 0.0)
+        if _fd > 0.0:
+            self._fall_delay = max(0.0, _fd - dt)
+            if self._fall_delay <= 0.0 and self.state in ("jump", "jump_excited"):
+                self.play("fall")
+            else:
+                self.body.on_ground = True
+                self.jumping = False      # ⭐ 踩到地面 → 跳跃结束
 
         # ⭐⭐ 2026-09-28：够不到的目标要主动作废（否则"贴着墙原地走"）
         #   根因：`_pick_goal` 挑目标写死 ±80px 边距，但角色的**真实轮廓**左右能占

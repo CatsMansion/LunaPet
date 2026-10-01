@@ -106,6 +106,56 @@ def frame_stance(im, anchor: Tuple[int, int]) -> Tuple[float, float]:
             float(ys.max()) - anchor[1])
 
 
+class TerrainWindow(QWidget):
+    """⭐⭐ 地形（猫爬架）—— 2026-10-01 新增
+
+    Ronny：「猫爬架**就是个地形**，默认在屏幕右端，最好可以让玩家进行自定义。」
+
+    ⭐ 为什么是**独立窗口**：地形在屏幕右端（固定位置），而角色窗口跟着她到处走，
+       两者不在同一个窗口里 —— 画在角色窗口里会跟着她跑，那就不是"地形"了。
+
+    ⛔ 不接收任何鼠标（`WindowTransparentForInput`）：她走上去、被拖过去都不该被挡。
+    ⭐ P0 用程序绘制（圆角木板 + 柔和投影），零素材；以后要换成美术素材只改 `paintEvent`。
+    ⭐ P2 扩展：把**其他应用窗口的上沿**也当成地形时，这个窗口就不需要了（直接读窗口矩形）。
+    """
+
+    def __init__(self, rect, label: str = "猫爬架"):
+        super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+                            | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.label = label
+        self.set_rect(rect)
+
+    def set_rect(self, rect):
+        """rect = (x0, y0, x1, y1) 屏幕坐标（y0 = 平台顶面）"""
+        self._rect = tuple(int(v) for v in rect)
+        x0, y0, x1, y1 = self._rect
+        self.setGeometry(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+
+    def paintEvent(self, ev):
+        x0, y0, x1, y1 = self._rect
+        w, h = x1 - x0, y1 - y0
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # ⭐ 平台厚度：取高度的 45%，至少 14px（下面是悬空的腿/影子区）
+        thick = max(14, int(h * 0.45))
+        # 柔和投影（板下方）
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 46))
+        p.drawRoundedRect(3, thick, w - 6, max(6, h - thick - 2), 10, 10)
+        # 板身：暖木色（与露娜的金棕配色协调）
+        grad = QLinearGradient(0, 0, 0, thick)
+        grad.setColorAt(0.0, QColor(212, 178, 132))
+        grad.setColorAt(1.0, QColor(168, 130, 88))
+        p.setBrush(grad)
+        p.drawRoundedRect(0, 0, w, thick, 9, 9)
+        # 顶面高光（一条亮边，让它看起来是"能站的面"）
+        p.setBrush(QColor(238, 214, 178, 210))
+        p.drawRoundedRect(4, 3, w - 8, max(3, thick // 6), 4, 4)
+        p.end()
+
+
 class PetWindow(QWidget):
     def __init__(self, pack: PetPack):
         super().__init__()
@@ -148,6 +198,18 @@ class PetWindow(QWidget):
         self.pet = Pet(pack, self.screen_rect)
         self.pet.body.x = scr.center().x()
         self.pet.body.y = scr.bottom()
+        # ⭐⭐⭐ 2026-10-01 地形（猫爬架）：独立窗口，和角色窗口互不相干
+        self.terrain_wins: list = []
+        for _t in (self.pet.terrains or []):
+            try:
+                _tw = TerrainWindow((_t["x0"], _t["y0"], _t["x1"], _t["y1"]),
+                                    _t.get("label", "猫爬架"))
+                _tw.show()
+                self.terrain_wins.append(_tw)
+                print(f"[地形] {_t.get('label','猫爬架')}  x[{_t['x0']:.0f},{_t['x1']:.0f}) "
+                      f"平台顶 y={_t['y0']:.0f}  高 {_t['y1']-_t['y0']:.0f}")
+            except Exception as _e:
+                print(f"[地形] ⛔ 建窗口失败：{_e}")
 
         self._drag_off = QPoint(0, 0)
         self._dragging = False          # 左键正按着（不代表已经在拖）
@@ -266,6 +328,12 @@ class PetWindow(QWidget):
         prev, pi = self._last_act, self._last_idx
         self._last_act, self._last_idx = cur, idx
         if prev is None or prev == cur:
+            return
+        # ⛔⛔ 爬墙除外（2026-10-01）：`climb` 期间 `body.y` 由引擎的爬升逻辑**逐帧控制**，
+        #   代表"她在墙上爬到哪了"，不是动作构图算出来的量。
+        #   实测漏了这条时：爬到平台顶（1730）后切 idle，这里的补偿又把她推到 1661.8
+        #   （**平台顶上方 68px**）→ 支撑检查判她悬空 → 播 fall 掉回屏幕底，前功尽弃。
+        if "climb" in (prev, cur):
             return
         ob, nb = self.frame_stance.get(prev), self.frame_stance.get(cur)
         if not ob or not nb or pi >= len(ob) or idx >= len(nb):
@@ -452,9 +520,15 @@ class PetWindow(QWidget):
           ③ 抓完歇一下（冷却）再继续追，⛔ 不能疯狂连扑
           ④ 放下激光笔 → 立刻停追、回常态
         """
-        if not getattr(self, "_laser_on", False):
-            return
         pet = self.pet
+        # ⭐⭐ 2026-10-01 Ronny：「新增**兴奋模式**，在激光模式下**不再 walk 改为 run**」
+        #   在这里一帧同步就行，不用去改三处开关（开/关激光的地方）。
+        if not getattr(self, "_laser_on", False):
+            if getattr(pet, "excited", False):
+                pet.set_excited(False)          # ⭐ 放下激光 → 退出兴奋态（run → walk）
+            return
+        if not getattr(pet, "excited", False):
+            pet.set_excited(True)               # ⭐ 拿起激光 → 进入兴奋态（walk → run）
         # ⭐ 冷却【无条件】每帧递减（⛔ 原来只在"没追到"分支递减 →
         #    追到后立刻再满足 near 条件 → 12 秒连扑 96 次）
         if getattr(pet, "_laser_cool", 0.0) > 0:
@@ -466,15 +540,86 @@ class PetWindow(QWidget):
         except Exception:
             return
         pet.set_cursor(cx)
+        # ⭐⭐ 2026-10-01：把**红点的 y** 也喂给 core —— Ronny「爬墙不一定非要爬到顶，
+        #   可以爬到头和小红点一样高的时候跳」→ core 的 `_terrain_climb()` 要用它算爬升终点。
+        try:
+            pet._laser_pos_y = float(QCursor.pos().y())
+        except Exception:
+            pass
         state = getattr(pet, "state", "")
+        # ⭐⭐ 2026-10-01 Ronny：「如果小红点在**左右两侧 500px** 的时候**先爬墙再朝着小红点跳**」
+        #   → 贴边模式下**不走"够近就抓"这条捷径**：她必须走到墙边、爬上去，
+        #     再由 core 的"爬完直接跳"（兴奋态）朝红点扑。
+        #   ⛔ 不这么改的话，因为她离红点 120px 就跳，永远走不到墙（实测在 x=314 就跳了）。
+        _wall_mode = False
+        try:
+            _edge = float(getattr(self, "_laser_wall_edge", 500.0))
+            _sr = self.screen_rect
+            _w = float(_sr.width()) if hasattr(_sr, "width") else float(_sr[2])
+            _hit_edge = (cx <= _edge) or (cx >= _w - _edge)
+            if _hit_edge:
+                # ⭐⭐ 2026-10-01 Ronny：「如果红点贴近墙但**不比 1.5 个人高**的时候
+                #   **选择不爬墙**」→ 横向贴边只是**必要**条件；还要
+                #   **红点比她头顶高出 1.5 个身高**才值得爬。
+                #   ⛔ 少了这条时：红点就在她够得着的高度，她也白跑一趟墙边去爬，很蠢。
+                #   ✅ 不爬 → `_wall_mode` 保持 False → 走下面"够近就跳抓"那条路（150→800 已放宽）。
+                _cy = None
+                try:
+                    _cy = float(QCursor.pos().y())
+                except Exception:
+                    _cy = None
+                if _cy is not None:
+                    _sil = self._cur_sil()
+                    _char_h = max(1.0, -float(_sil[2]))   # dtp 是负数 → 身高 = |dtp|
+                    _head_y = pet.body.y + float(_sil[2])
+                    _wall_mode = (_head_y - _cy) > 1.5 * _char_h
+        except Exception:
+            _wall_mode = False
+        self._laser_wall_mode = _wall_mode
         # ② 追到了 → 跳起来抓（但要过冷却）
-        near = abs(cx - pet.body.x) <= float(getattr(self, "_laser_grab_r", 120.0))
-        if near and getattr(pet, "_laser_cool", 0.0) <= 0.0 \
-                and state in ("idle", "walk") and self._has_frames("tease"):
-            pet.play("tease")
-            pet.state_timer = 2.5
-            pet._laser_cool = 2.8          # ⭐ 抓一次歇 2.8 秒（tease 约 2.4 秒 + 缓一下）
-            return
+        # ⭐⭐ 2026-10-01 Ronny：「横向起跳抓小红点的距离**从 150px 改为 800px**」
+        #   ⛔⛔ 关键：真正决定"**什么时候**起跳"的是**这个半径**，不是下面的 dx 钳制。
+        #      旧值是 120px（且全文无赋值处，等于硬编码）—— 只把 dx 从 150 放宽到 800
+        #      **完全没有任何可见效果**（离 120px 内起跳，dx 永远 ≤120）。
+        #   ✅ 所以三处口径一起放宽到 800：
+        #      ① 触发半径（这里）② 起跳的水平位移上限（下面 dx）③ core「爬完起跳」的 dx
+        #   ⭐ 效果：她能在 800px 外就朝红点一跃扑过去（更像猫的"扑"，而不是走近了才小跳）。
+        near = abs(cx - pet.body.x) <= float(getattr(self, "_laser_grab_r", 800.0))
+        if near and not _wall_mode and getattr(pet, "_laser_cool", 0.0) <= 0.0 \
+                and state in ("idle", "walk"):
+            # ⭐⭐ 2026-10-01：抓红点用 **jump_excited**（炸尾版跳，派单 28-A）优先 ——
+            #   兴奋时炸尾，正是 Ronny 要的"猫咪兴奋会炸尾巴"。
+            #   逐级兜底：jump_excited → jump（普通跳）→ tease（逗猫棒扑）。
+            grab = ("jump_excited" if self._has_frames("jump_excited") else
+                    "jump" if self._has_frames("jump") else
+                    "tease" if self._has_frames("tease") else None)
+            if grab:
+                pet.play(grab)
+                pet.state_timer = 2.5
+                # ⭐⭐ 2026-10-01（Ronny：「我要的跳是那种往上几百像素的位移，然后保持
+                #   二次函数的轨迹 fall 下来」＋「高度**不要固定**，要去**追鼠标**，
+                #   而且最好能进行**大约 150px 的斜向位移**」）：
+                #   ⛔ 旧写法只 `play(grab)` —— 那只是"原地的跳姿势"，她脚不离地。
+                #   ✅ 现在由**引擎**给初速度，`update()` 里现有的重力自然形成抛物线；
+                #      素材只负责姿势，且**按飞行进度加速塞进前 75%**。
+                try:
+                    gp = QCursor.pos()
+                    laser_x, laser_y = float(gp.x()), float(gp.y())
+                except Exception:
+                    laser_x, laser_y = pet.body.x, pet.body.y
+                # ⭐⭐ 2026-10-01 Ronny：「抓小红点的时候让人物**顶端**去找小红点，
+                #   而不是人物**脚部**」→ 用头顶 y（= 脚底 y + 轮廓上偏移，dtp 是负数）算高度。
+                _sil = self._cur_sil()
+                _head_y = pet.body.y + float(_sil[2])
+                h = max(60.0, min(560.0, _head_y - laser_y))
+                # ⭐⭐ 2026-10-01 Ronny：「横向起跳抓小红点的距离**从 150px 改为 800px**」
+                #   → 她能在更大范围内一跃扑到红点（原来是 150px，够不着就得先走过去）。
+                #   ⛔ 注意：`_laser_grab_r`（够近就抓的半径）仍单独控制"什么时候起跳"，
+                #      这里只管"起跳后能横向够多远"。
+                dx = max(-800.0, min(800.0, laser_x - pet.body.x))
+                pet.jump_to(h, dx)
+                pet._laser_cool = 1.6 + pet.jump_flight_time(h)
+                return
         # ③ 还没追到 → 持续 seek
         if getattr(pet, "_laser_cool", 0.0) > 0:
             return
@@ -483,9 +628,37 @@ class PetWindow(QWidget):
         #        会把我们的 seek 目标**顶掉**成随机漫游点（实测 goal_x 2200 → 83），
         #        于是她掉头往反方向走，永远追不到红点。
         #   ✅ 激光笔在手期间，红点就是唯一目标，谁都不能覆盖。
-        if state in ("idle", "walk"):
+        if state in ("idle", "walk") and pet.body.on_ground:
+            # ⭐⭐ 2026-10-01 Ronny：「如果小红点在**左右两侧 500px** 的时候
+            #   **先爬墙再朝着小红点跳**」
+            #   → 红点贴边时，把目标从"红点本身"改成"**那面墙的位置**"：
+            #     她走过去 → core 的 `_terrain_climb()` 自动带她爬墙 →
+            #     爬到顶（兴奋态）自动起跳，跳跃方向朝红点（见 core 的"爬完直接跳"）。
+            #   ⛔ 目标仍是 seek（这样速度和兴奋态的手感不变），只是目标点换成了墙。
+            _tgt = cx
+            _edge = float(getattr(self, "_laser_wall_edge", 500.0))
+            # ⛔ screen_rect 在真机上是 QRect、在测试里可能是 tuple → 两种都兼容
+            _sr = self.screen_rect
+            _w = float(_sr.width()) if hasattr(_sr, "width") else float(_sr[2])
+            try:
+                for _t in (pet.terrains or []):
+                    tx0, tx1 = float(_t["x0"]), float(_t["x1"])
+                    if cx <= _edge and tx0 <= _edge:
+                        _tgt = (tx0 + tx1) / 2.0      # 左墙
+                        break
+                    if cx >= _w - _edge and tx1 >= _w - _edge:
+                        _tgt = (tx0 + tx1) / 2.0      # 右墙
+                        break
+            except (KeyError, TypeError, ValueError):
+                pass
             pet.goal = "seek"
-            pet.goal_x = cx
+            pet.goal_x = _tgt
+            # ⭐⭐ 关键：**光标目标也要跟着改** ——
+            #   ⛔ 只改 goal_x 不够：`step()` 里的 `_pick_goal()` 每帧拿 `_cursor_x`
+            #      重新挑目标，会把我们设的墙位置**覆盖回红点**（实测 goal_x 65 → 200）。
+            #   ✅ 贴边时该走的目标就是墙，所以光标目标也设成墙。
+            pet.set_cursor(_tgt)
+            pet._laser_pos_x = cx                 # ⭐ 给 core 的"爬完直接跳"算方向用
 
     def _sleep_via_tool(self):
         """⭐ 枕头工具：一键让她睡（sleep_in → sleep_loop）
