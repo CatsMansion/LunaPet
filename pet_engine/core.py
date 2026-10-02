@@ -106,6 +106,20 @@ class Behaviour:
     tilt_v_tau: float = 0.05           # 鼠标速度低通（滤抖动）
     tilt_force_tau: float = 0.12       # ⭐ 力的惯性：换向时"手"不会瞬移（越大越拖）
     tilt_drive_exp: float = 1.6        # ⭐ 力的指数曲线：>1 → 慢移几乎不倾、快甩才猛涨
+    # ⭐⭐ 2026-10-02 Ronny：「起跳时**头朝起跳方向倾斜**，空中慢慢回正，下落时脚朝下落方向倾斜」
+    #   ⭐ 22 而不是 14：跳跃全程只有 ~1.15s，而摆的滞后会吃掉大半
+    #      （实测 14 时峰值只有 4.26°，几乎看不出；22 → 峰值 ~8°，128px 下可见但不过分）
+    air_tilt_max: float = 22.0
+    air_tilt_vref: float = 1100.0      # ⭐ 空中自己的参考速度（px/s）
+    #   ⛔ 不能复用拖拽的 `tilt_vref=3000`（那是**鼠标甩动**速度）：
+    #      跳 300px 时 vy 峰值才 ~1000，归一化后只有 0.33 → 倾角只有 3.9°，几乎看不出来。
+    air_tilt_vy_w: float = 0.55        # 垂直速度贡献权重（相对水平）
+    air_tilt_tau: float = 0.09         # ⭐ 驱动力的低通（滞后来源：越大越"有重量"）
+    # ⭐⭐ 2026-10-02 Ronny：「我要的**爬墙加横向大跳**呢，跳的**角度调大到 30 度**」
+    climb_jump_angle: float = 30.0     # 爬完起跳的发射角（度）—— 越小越平射、横向越大
+    air_jump_dx_max: float = 1800.0    # 横向位移**安全上限**（px）
+    #   ⛔ 800 会把 30° 夹成 47.7°（实测：30° 在 h=220 时要飞 ~1525px，被 800 夹住 → 角度失真）。
+    #   ✅ 1800 只是防极端（角度极小或高度极大时飞出屏幕），30° 不会被夹。
     screen_margin: int = 0
     walk_speed: float = 1.0        # 走速倍率（手感微调用）
     # ⭐⭐ 2026-09-29 Ronny 定：激光笔在手时移速暴增至该倍率（露娜 = 2.5）
@@ -128,6 +142,12 @@ class Behaviour:
 #   ⭐ 可在 pet.json 的每个地形项里用 `edge_tol` 单独覆盖。
 TERRAIN_EDGE_TOL = 200.0
 
+# ⭐⭐ 2026-10-02 Ronny：「用梳子点击露娜**有几率触发 fall**，之前的平地 fall 还没解决」
+#   根因：这些「**玩家主动触发的交互动作**」不在 `_terrain_climb()` / 支撑检查的排除列表里，
+#   于是她在**梯子附近**做这些动作时会被地形打断（拉到墙上 → 爬 → 跳下/落下 = 玩家看到的 fall）。
+#   ⭐ 复现：屏幕中间点梳子 = `brush → idle`（正常）；左墙附近 = `jump_excited → fall`（brush 被吃掉）。
+#   ✅ 规矩：**交互动作期间，她不被地形/支撑检查打断。**
+INTERACT_STATES = ("brush", "tease", "eat", "pat")
 
 def _resolve_terrain(t: dict, screen: Tuple[int, int, int, int]) -> dict:
     """把地形配置解析成**绝对屏幕坐标**。
@@ -152,6 +172,13 @@ def _resolve_terrain(t: dict, screen: Tuple[int, int, int, int]) -> dict:
             "x1": v("x1", sl, sr), "y1": v("y1", st, sb),
             # ⭐ 边缘余量：没配就用全局默认（⛔ 显式带过来，否则被这里丢掉）
             "edge_tol": float(t.get("edge_tol") or TERRAIN_EDGE_TOL),
+            # ⭐⭐ 2026-10-02 Ronny：「**分开墙和平台**，把墙设定成**梯子，只能爬不能停留**」
+            #   `ladder`   = 只能爬，**不能站**（不进地面判定 → 爬到顶自然悬空、不停留）
+            #   `platform` = 可以站上去、可以停留（默认，如猫爬架）
+            "type": str(t.get("type") or "platform").lower(),
+            # ⭐ 爬升触发的水平容差（见 `_terrain_climb`）：梯子贴边时她被屏幕边界挡在外面，
+            #   没有这个容差就永远触发不了爬升。
+            "climb_reach": float(t.get("climb_reach") or 0.0),
             "label": t.get("label", "猫爬架")}
 
 
@@ -235,6 +262,13 @@ def load_pack(folder: str) -> PetPack:
         tilt_v_tau=float(b.get("tilt_v_tau", 0.05)),
         tilt_force_tau=float(b.get("tilt_force_tau", 0.12)),
         tilt_drive_exp=float(b.get("tilt_drive_exp", 1.6)),
+        # ⛔ 这里的默认值必须和 dataclass 保持一致（之前写 14 / 0.14，和 22 / 0.09 不一致 → 调了没效果）
+        air_tilt_max=float(b.get("air_tilt_max", 22.0)),
+        air_tilt_vref=float(b.get("air_tilt_vref", 1100.0)),
+        air_tilt_vy_w=float(b.get("air_tilt_vy_w", 0.55)),
+        air_tilt_tau=float(b.get("air_tilt_tau", 0.09)),
+        climb_jump_angle=float(b.get("climb_jump_angle", 30.0)),
+        air_jump_dx_max=float(b.get("air_jump_dx_max", 1800.0)),
         screen_margin=int(b.get("screen_margin", 0)),
         walk_speed=float(b.get("walk_speed", 1.0)),
         laser_speed_mul=float(b.get("laser_speed_mul", 2.5)),
@@ -674,6 +708,12 @@ class Pet:
             #      ⭐ 这个值可在 pet.json 里按地形单独调（`edge_tol`），不用改代码。
             if x + tol < x0 or x - tol > x1:
                 continue
+            # ⭐⭐ 2026-10-02：**梯子不算地面** —— Ronny「把墙设定成梯子，**只能爬不能停留**」
+            #   ⛔ 少了这条时：她爬到梯子顶会把 `_climb_top` 当站立点 → **停在那儿不动**，
+            #      而"墙"本来是要她爬过去/翻过去的，不是给她站的。
+            #   ✅ ladder 不进 `ground_at` → 爬到顶立刻悬空 → 自然落下（不停留）。
+            if t.get("type") == "ladder":
+                continue
             # ⭐ 只有脚底"已经到平台顶附近或更高"时，平台才算她的地面（容差 4px）
             if y <= top + 4.0:
                 g = min(g, top)
@@ -689,16 +729,30 @@ class Pet:
         """
         if self.dragging or not self.body.on_ground:
             return False
+        # ⭐ 爬完一次歇一会儿（ladder 到顶掉下来后不再立刻爬，见 step 的到顶分支）
+        if getattr(self, "_climb_cool", 0.0) > 0.0:
+            return False
         if self.state in ("climb", "fall", "land", "land_settle",
-                          "drag", "drag_in", "drag_out"):
+                          "drag", "drag_in", "drag_out") or self.state in INTERACT_STATES:
+            # ⭐⭐ 2026-10-02 修（Ronny：「**用梳子点击露娜有几率触发 fall**，之前的平地 fall 还没解决」）：
+            #   ⛔ 根因：`brush` 不在排除列表里 → 她在**梯子附近**梳毛时，
+            #      `_terrain_climb()` 会立刻触发并把 `brush` 覆盖成 `climb`，
+            #      爬到顶再跳下/落下 → 玩家看到的就是"点梳子有几率 fall"。
+            #   ⭐ 复现：屏幕中间点梳子 = `brush → idle`（正常）；
+            #      左墙附近 = `jump_excited → fall`、右墙附近 = `fall`（brush 被吃掉）。
+            #   ✅ 玩家主动触发的**交互动作期间，她不该被地形打断** —— 一并排除。
             return False
         for t in self.terrains:
             try:
                 x0, top, x1 = float(t["x0"]), float(t["y0"]), float(t["x1"])
             except (KeyError, TypeError, ValueError):
                 continue
-            # 她的水平位置已经进入平台范围，但脚底还在平台顶下方 → 该爬
-            if x0 <= self.body.x <= x1 and self.body.y > top + 4.0:
+            # 她的水平位置已经进入平台范围（含 `climb_reach` 容差），但脚底还在平台顶下方 → 该爬
+            #   ⭐⭐ `climb_reach`：梯子**贴边**时（x[0,70]），屏幕边界会把她的身体挡在
+            #      x≈142 —— 物理上进不去，`x0 <= x <= x1` 永不成立 → **爬升永远不触发**。
+            #      ✅ 给一个"够得着"的容差（默认 150），她站在墙前就能开始爬。
+            _reach = float(t.get("climb_reach") or 0.0)
+            if (x0 - _reach) <= self.body.x <= (x1 + _reach) and self.body.y > top + 4.0:
                 # ⭐⭐ 只有 climb 素材**真的装机了**才启用爬升。
                 #   ⛔ 没有素材时**什么都不做** —— 不要在这里 play("idle") 或清 goal：
                 #      那样会每帧打断她的状态机（实测：她会被永久卡住不动，
@@ -723,8 +777,24 @@ class Pet:
                     if _head_stop < self.body.y - 4.0:
                         _stop = max(top, _head_stop)
                 self.goal = None
+                # ⭐⭐ 2026-10-02 Ronny：「让露娜**只能面朝梯子爬行**而不是背朝梯子」
+                #   ⛔ 不强制时：她可能带着上一次跳跃/走路的朝向就去爬（脸朝外、背贴墙），
+                #      看着像"背靠着往上蹭"，很怪。
+                #   ✅ 爬之前显式把朝向对准梯子：
+                #      · 梯子在她右边 → 朝右；在她左边 → 朝左
+                #      · 她已经站在梯子的横向范围内 → 朝**最近的屏幕边缘**（脸贴墙）
+                _cx = (x0 + x1) / 2.0
+                if self.body.x < _cx - 1.0:
+                    self.facing_right = True
+                elif self.body.x > _cx + 1.0:
+                    self.facing_right = False
+                else:
+                    _sw = float(self.screen[2]) if len(self.screen) > 2 else 0.0
+                    self.facing_right = (_cx > _sw / 2.0)
                 self.play("climb")
                 self._climb_top = _stop
+                # ⭐ 记下这次爬的是不是梯子 —— 到顶时决定"能不能停留"
+                self._climb_is_ladder = (t.get("type") == "ladder")
                 self.climb_speed = max(60.0, (self.body.y - _stop) / 1.33)   # ⭐ 与素材节奏对齐（16 帧 @12fps）
                 return True
         return False
@@ -765,6 +835,49 @@ class Pet:
     def _jumping(self) -> bool:
         """是否处于引擎驱动的跳跃中"""
         return bool(getattr(self, "jumping", False))
+
+    def jump_angle(self, height: float, angle_deg: float, toward_x: Optional[float] = None) -> bool:
+        """⭐⭐ 按**发射角**跳 —— 2026-10-02 Ronny：「跳的角度给我调大到 **30 度**」
+
+        `jump_to()` 是"给高度 + 给水平位移"，两者独立、角度是算出来的副产品。
+        这里反过来：**角度是输入**，水平速度由角度推出来：
+
+            vy0 = sqrt(2 g h)            （由要跳到的高度定）
+            tan(θ) = vy0 / vx0  →  vx0 = vy0 / tan(θ)
+
+        ⭐ θ 越小越"平射"（横向位移越大）；θ=90° 就是垂直原地跳。
+        ⭐⭐ θ=30° 时 vx0 = vy0 × 1.732 —— 非常明显的**横向大跳**。
+           例：h=300 → vy0≈1039、vx0≈1800 px/s，飞 ~1.15s → 横向 ~2000px（但会被 dx 上限夹住）。
+
+        `toward_x`：目标 x（决定往哪边跳）；不给就朝当前面向。
+        """
+        if not self.body.on_ground or self.dragging:
+            return False
+        h = max(0.0, float(height))
+        if h <= 1.0:
+            return False
+        _th = max(5.0, min(89.0, float(angle_deg)))
+        vy0 = math.sqrt(2.0 * self.behaviour.gravity * h)
+        vx0 = vy0 / math.tan(math.radians(_th))
+        # ⭐ 横向位移上限：θ=30° 时纯算会飞出 ~2000px，得夹住
+        #   （Ronny 2026-10-01：「横向起跳抓小红点的距离**改为 800px**」，口径要一致）
+        _t = (2.0 * vy0 / self.behaviour.gravity) if self.behaviour.gravity > 1e-6 else 0.0
+        _max = float(getattr(self.behaviour, "air_jump_dx_max", 800.0))
+        if _t > 1e-6 and abs(vx0) * _t > _max:
+            vx0 = _max / _t
+        if toward_x is not None:
+            _d = float(toward_x) - self.body.x
+            _sgn = 1.0 if _d >= 0 else -1.0
+        else:
+            _sgn = 1.0 if self.facing_right else -1.0
+        self.body.vy = -vy0
+        self.body.vx = vx0 * _sgn
+        self.body.on_ground = False
+        self.jumping = True
+        self._jump_total = self.jump_flight_time(h)
+        self._jump_t = 0.0
+        self._jump_switched = False
+        return True
 
     def jump_flight_time(self, height: float) -> float:
         """跳 height 高再落回原高度所用的时间（用来配素材时长/fps）"""
@@ -882,9 +995,54 @@ class Pet:
         else:
             self._walk_v = 0.0
 
-        # ⭐ 松手后：驱动力归零，让单摆自己被重力拉回（会晃几下再停）
-        self._force_f += (0.0 - self._force_f) * min(1.0, dt / max(b.tilt_force_tau, 1e-4))
+        # ⭐⭐ 2026-10-02：**空中**用速度驱动倾斜（起跳朝起跳方向 → 顶点回正 → 下落反向倾）
+        #   落地（或拖拽）时驱动力归零 → 摆被自己的回正力拉回（会晃几下再停）
+        if not self.body.on_ground and not self.dragging:
+            self._update_air_tilt(dt)
+        else:
+            self._force_f += (0.0 - self._force_f) * min(1.0, dt / max(b.tilt_force_tau, 1e-4))
         self._tilt_pendulum(dt, self._force_f)
+
+    def _update_air_tilt(self, dt: float):
+        """⭐⭐ 空中（跳跃 / 下落）的倾斜 —— 2026-10-02 Ronny 提出
+
+        Ronny：「起跳的时候加入角度，**人物头朝起跳的方向倾斜**，在空**慢慢回正**，
+                下落时**脚朝下落的方向倾斜**」
+
+        ⭐⭐ 实现要点：**不硬编码"起跳/顶点/下落"三段**，而是用**速度方向**驱动
+           **已有的弹簧-阻尼摆**（`_tilt_pendulum`）。这样三段全是物理自然产生的：
+
+           | 阶段 | 速度 | 摆的行为 |
+           |---|---|---|
+           | 起跳瞬间 | 朝上 + 朝目标 | 被推向"朝起跳方向" → **滞后几帧才到**（这就是重量感） |
+           | 上升 | 垂直速度衰减 | 驱动力减小 → 摆**往回走** |
+           | 顶点 | 垂直速度≈0 | **回正** |
+           | 下落 | 垂直速度反向 | 摆**反向倾**（脚朝下落方向） |
+           | 落地 | — | 驱动力归零 → 摆自己晃回正 |
+
+        ⛔ 硬编码三段的问题：切帧生硬、且"顶点"这个时刻不好抓（不同跳高、不同目标
+           顶点时间都不一样）。速度驱动则**自动适配任何跳法**。
+        """
+        b = self.behaviour
+        # 速度归一化（用**空中自己的**参考速度，见 `air_tilt_vref` 的说明）
+        _vr = max(b.air_tilt_vref, 1.0)
+        vx_n = self.body.vx / _vr
+        vy_n = self.body.vy / _vr
+        # ⭐ 目标倾角：
+        #   · vx > 0（往右）→ 往右倾（正）／vx < 0 → 往左倾 —— 身体**朝运动方向扑**
+        #   · vy：**只在上升（vy<0）时**增强倾斜（"头朝起跳方向冲"）
+        #     ⛔ 下落时**不反向**（若让 vy 双向作用，往右跳会在下落时"往回倒"，很不自然）
+        #     ✅ 下落时 vy 贡献为 0 → 只剩 vx → 摆自然回正 = "脚朝下落方向"
+        vy_term = max(0.0, -vy_n) * b.air_tilt_vy_w
+        tgt = (vx_n + vy_term) * b.air_tilt_max
+        tgt = max(-b.air_tilt_max, min(b.air_tilt_max, tgt))
+        # ⭐ 把"目标角"精确换成摆的驱动力：稳态时 omega0^2*sin(th_rad)*(180/pi) = force → th = 目标角
+        #   ⛔⛔ 那个 `(180/pi)` **不能漏** —— `_tilt_pendulum` 的回正力是**度/s^2**，
+        #   漏了它驱动力会小 57 倍（实测倾角只有 0.07° 而不是 3°+，几乎看不出来）。
+        _th = math.radians(tgt)
+        _f = (b.tilt_omega0 ** 2) * math.sin(_th) * (180.0 / math.pi)
+        # ⭐ 力的低通 = 滞后（Ronny 记过：「峰值角度只是观感，**滞后才是重量感的来源**」）
+        self._force_f += (_f - self._force_f) * min(1.0, dt / max(b.air_tilt_tau, 1e-4))
 
     def _tilt_pendulum(self, dt: float, force: float):
         """⭐⭐ 受驱动的阻尼单摆 —— 这才是"有重量"的正确物理
@@ -1001,6 +1159,29 @@ class Pet:
                     self._wake_stage = 0
                     self.play("idle")
                     self.state_timer = random.uniform(*self.behaviour.idle_duration)
+                elif self.state in INTERACT_STATES:
+                    # ⭐⭐ 2026-10-02 修（Ronny：「用梳子点击露娜**有几率触发 fall**」）
+                    #   诊断：点梳子前她**已经在 climb** —— 她站在梯子的 `climb_reach` 内，
+                    #   离墙 ~87px 就已经开始爬了。`brush` 插进来播完 → 状态回 idle，
+                    #   下一帧 `_terrain_climb()` 立刻又把她拉去爬 → 爬到顶落下来
+                    #   → 玩家看到的就是"点梳子有几率 fall"。
+                    #   ⛔ 光把 INTERACT_STATES 加进 `_terrain_climb` 的排除列表**不够** ——
+                    #      那只挡住"正在播"的那 1.2 秒，播完立刻失效。
+                    #   ✅ 交互动作**播完之后给她一点冷却**，先"消化"完再面对地形。
+                    self.play("idle")
+                    self.state_timer = random.uniform(*self.behaviour.idle_duration)
+                    if self.terrains:
+                        self._climb_cool = max(getattr(self, "_climb_cool", 0.0), 3.0)
+                        # ⭐⭐ 更进一步：**让她走开**。
+                        #   ⛔ 只给冷却的话，3 秒后她还站在梯子范围内 → 照样去爬 → 爬完落下
+                        #      → 玩家眼里还是"点了梳子之后莫名掉一下"。
+                        #   ✅ 交互完给一个**朝屏幕中间**的漫游目标，让她自己走出攀爬范围。
+                        try:
+                            _mid = (float(self.screen[0]) + float(self.screen[2])) / 2.0
+                            self.goal = "goto"
+                            self.goal_x = _mid + random.uniform(-320.0, 320.0)
+                        except (IndexError, TypeError, ValueError):
+                            pass
                 else:
                     self.state_timer = random.uniform(*self.behaviour.idle_duration)
                     self.play("idle")
@@ -1019,36 +1200,83 @@ class Pet:
         #   ✅ 现在：撞到平台侧面 → 播 climb，逐帧把 body.y 抬到平台顶 → 站定
         #   ⛔ climb 素材没装机时：停在边缘不动（不弹上去），素材到位自动生效
         if self.state == "climb":
-            # ⛔⛔ 爬墙时**不能有重力**：她在贴墙爬，不是自由落体。
-            #   实测漏了这条时，重力每帧把她往下拽，和爬升速度对抗 →
-            #   她在 2128~2152 之间来回晃、永远爬不上去。
-            self.body.vy = 0.0
-            self.body.on_ground = True
-            _top = getattr(self, "_climb_top", None)
-            _spd = getattr(self, "climb_speed", 300.0)
-            self.body.y -= _spd * dt
-            if _top is not None and self.body.y <= float(_top):
-                self.body.y = float(_top)
+            # ⭐⭐ 2026-10-02 修（Ronny：「用梳子点击露娜**有几率触发 fall**」）
+            #   ⛔ 根因在这：这个分支**不检查 `_climb_cool`**。
+            #      `_terrain_climb()` 那边我刚加了冷却检查，但**只要她的 state 已经是 climb**，
+            #      这个分支就会每帧继续爬、一直到顶 → 走"到顶分支"→ 跳下/落下
+            #      → 玩家看到的就是"点了梳子之后莫名掉一下"。
+            #      实测：点梳子前她在梯子 reach 内，已经处于 climb；brush 插进来播完，
+            #      状态残留 → 这里继续爬到顶 → fall（157 / 3700 位置复现）。
+            #   ✅ 冷却期间**放弃这次攀爬**，回落到常态（让她按交互后的目标走开）。
+            if getattr(self, "_climb_cool", 0.0) > 0.0:
+                self._climb_top = None
+                self._climb_is_ladder = False
                 self.body.on_ground = True
-                # ⭐⭐ 2026-10-01 Ronny：「在高处玩激光会在爬行和跳之间穿插 idle，
-                #   ⛔ 不要穿插 idle，**直接爬完就跳**」
-                #   → 兴奋态（激光等）下：爬到顶立刻起跳；否则才回 idle。
-                if getattr(self, "excited", False):
-                    self.play("jump_excited" if "jump_excited" in self.pack.actions
-                              else "jump" if "jump" in self.pack.actions else "idle")
-                    # ⭐⭐ Ronny：「先爬墙**再朝着小红点跳**」→ 跳跃的水平方向朝红点
-                    #   （`_laser_pos_x` 由 ui 的激光驱动每帧写入；没有就朝她当时面向）
-                    _lx = getattr(self, "_laser_pos_x", None)
-                    _dx = 0.0
-                    if _lx is not None:
-                        # ⭐⭐ 2026-10-01 Ronny：横向起跳抓红点的距离 150 → **800**
-                        #   （同 ui 的"够近就抓"那处；爬完起跳也是"朝红点扑"，口径要一致）
-                        _dx = max(-800.0, min(800.0, float(_lx) - self.body.x))
-                    # 跳的高度用**头顶**对目标（同激光接线：顶端去够，不是脚底）
-                    self.jump_to(float(getattr(self, "_climb_jump_h", 220.0)), _dx)
-                else:
-                    self.play("idle")
-                    self.state_timer = random.uniform(*self.behaviour.idle_duration)
+                self.jumping = False
+                self.play("idle")
+                self.state_timer = random.uniform(*self.behaviour.idle_duration)
+            else:
+                # ⛔⛔ 爬墙时**不能有重力**：她在贴墙爬，不是自由落体。
+                #   实测漏了这条时，重力每帧把她往下拽，和爬升速度对抗 →
+                #   她在 2128~2152 之间来回晃、永远爬不上去。
+                self.body.vy = 0.0
+                self.body.on_ground = True
+                _top = getattr(self, "_climb_top", None)
+                _spd = getattr(self, "climb_speed", 300.0)
+                self.body.y -= _spd * dt
+                if _top is not None and self.body.y <= float(_top):
+                    self.body.y = float(_top)
+                    self.body.on_ground = True
+                    # ⭐⭐ 2026-10-01 Ronny：「在高处玩激光会在爬行和跳之间穿插 idle，
+                    #   ⛔ 不要穿插 idle，**直接爬完就跳**」
+                    # ⭐⭐ 2026-10-02 Ronny：「**统一**把爬完梯子之后的下来方式改为**跳下**」
+                    #   → **梯子**爬到顶（不管是不是兴奋态）都**跳下**；
+                    #     平台（platform）保持原样：兴奋态跳、平时站定。
+                    _is_ladder = bool(getattr(self, "_climb_is_ladder", False))
+                    if getattr(self, "excited", False) or _is_ladder:
+                        self.play("jump_excited" if "jump_excited" in self.pack.actions
+                                  else "jump" if "jump" in self.pack.actions else "idle")
+                        # ⭐⭐ Ronny：「先爬墙**再朝着小红点跳**」→ 跳跃的水平方向朝红点
+                        #   （`_laser_pos_x` 由 ui 的激光驱动每帧写入；没有就朝她当时面向）
+                        _lx = getattr(self, "_laser_pos_x", None)
+                        _dx = 0.0
+                        if _lx is not None:
+                            # ⭐⭐ 2026-10-01 Ronny：横向起跳抓红点的距离 150 → **800**
+                            #   （同 ui 的"够近就抓"那处；爬完起跳也是"朝红点扑"，口径要一致）
+                            _dx = max(-800.0, min(800.0, float(_lx) - self.body.x))
+                        # ⭐⭐ 2026-10-02 Ronny：「我要的**爬墙加横向大跳**呢，跳的角度给我调大到 **30 度**」
+                        #   → 爬完不是"随便跳一下"，而是按 **30° 发射角**朝红点**横向扑出去**
+                        #     （30° 比之前的口径平得多 → 横向位移明显变大，看起来就是在"扑"）
+                        # ⭐⭐ 2026-10-02 Ronny：「我要的**爬墙加横向大跳**呢，跳的角度给我调大到 **30 度**」
+                        #   → 爬完不是"随便跳一下"，而是按 **30° 发射角**横向扑出去。
+                        #
+                        #   ⭐⭐ 方向 = **朝屏幕内（离开墙）**，不是朝红点：
+                        #      ⛔ 朝红点的话：红点就在那面墙的上方，她会**往墙里跳**、被屏幕边界顶住
+                        #         （实测落点只挪了 34px，看起来就是"贴着墙蹦一下"，根本不是横向大跳）。
+                        #      ✅ 朝屏幕中心 → 她从墙上**蹬出去**，横向 ~1500px，才是 Ronny 要的"扑"。
+                        _h = float(getattr(self, "_climb_jump_h", 220.0))
+                        _mid = float(self.screen[2]) / 2.0 if len(self.screen) > 2 else self.body.x
+                        if self.jump_angle(_h, self.behaviour.climb_jump_angle, _mid):
+                            # ⭐ 梯子跳下后给个**短**冷却，只防"落地立刻又爬"。
+                            #   ⛔ 不能像兜底那条给 8s —— 她是**跳到屏幕中间**再走回来，
+                            #      走回来本身就要几秒，冷却太长会让她回来时干等。
+                            if _is_ladder:
+                                self._climb_cool = 2.0
+                    elif _is_ladder:
+                        # ⛔ 兜底：梯子但**跳不了**（没有 jump / jump_excited 素材，`jump_angle` 返回 False）。
+                        #   这时退回"就地离开墙面"（悬空 → 支撑检查接 fall），
+                        #   ⛔ 绝不能播 idle —— 那她就会"站在墙顶"，正是 Ronny 要禁的"停留"。
+                        self.body.on_ground = False
+                        self.jumping = False
+                        self.play("fall" if self._has("fall") else "idle")
+                        # ⭐ 爬完一次歇一会儿 —— ⛔ 不加这条时她会**无限循环**：
+                        #   爬上去 → 到顶 → 掉到地面 → 脚下又踩着梯子范围 → 立刻再爬，
+                        #   实测 600 帧里爬了 4 轮，看起来像抽搐，不是猫该有的行为。
+                        #   ⛔ 4s 时她站在梯子底下**每 4 秒爬一回**（实测 20 秒爬 4 次），太勤。
+                        self._climb_cool = 8.0
+                    else:
+                        self.play("idle")
+                        self.state_timer = random.uniform(*self.behaviour.idle_duration)
         else:
             self._terrain_climb(dt)
 
@@ -1083,6 +1311,11 @@ class Pet:
                 self._jump_switched = False
                 self.body.vx = 0.0           # ⭐ 水平速度也清零，别让她落地后继续滑
 
+        # ⭐ 爬梯子的冷却（每帧无条件递减）
+        _cc = getattr(self, "_climb_cool", 0.0)
+        if _cc > 0.0:
+            self._climb_cool = max(0.0, _cc - dt)
+
         # ⭐⭐⭐ 2026-10-01 地形的「支撑检查」（⛔ 爬墙期间跳过：那时候"有没有地面"
         #   不适用，她在墙上；跑这段会把她判成悬空 → 启动重力 → 爬升被拽回去）
         #   ⛔ 原来 `on_ground` 只在【落地】那一刻被设 True（clamp_to_screen 里），
@@ -1107,6 +1340,7 @@ class Pet:
                 if (self.state not in ("fall", "land", "land_settle", "climb",
                                        "drag", "drag_in", "drag_out",
                                        "jump", "jump_excited")
+                        and self.state not in INTERACT_STATES
                         and getattr(self, "_fall_delay", 0.0) <= 0.0):
                     # ⭐⭐ 2026-10-01 Ronny：「从高处下来**只 fall 改为先跳再 fall**」
                     #   落差够大（比如从地形平台顶掉下来）→ 先播起跳姿势一小段，
@@ -1127,9 +1361,13 @@ class Pet:
             self._fall_delay = max(0.0, _fd - dt)
             if self._fall_delay <= 0.0 and self.state in ("jump", "jump_excited"):
                 self.play("fall")
-            else:
-                self.body.on_ground = True
-                self.jumping = False      # ⭐ 踩到地面 → 跳跃结束
+        # ⛔⛔ 2026-10-02 修（Ronny：「露娜总是莫名其妙的原地 fall 一下」）：
+        #   这里原本有一段 `else: self.body.on_ground = True; self.jumping = False` ——
+        #   它是**从上面那个"支撑检查"复制过来的**，但这个 `if` 的 else 语义完全不同：
+        #   只要她身上带 `_fall_delay`（>0）且延时还没到、或状态不是 jump，
+        #   就会被**每帧强行标记成"已经踩在地上"** → 重力关闭 → **她悬在半空**
+        #   → 到点播 fall → 就是那个"莫名其妙原地 fall 一下"。
+        #   ✅ 删掉。踩地/起跳结束由上面的支撑检查的 else 负责，这里只管计时与切动作。
 
         # ⭐⭐ 2026-09-28：够不到的目标要主动作废（否则"贴着墙原地走"）
         #   根因：`_pick_goal` 挑目标写死 ±80px 边距，但角色的**真实轮廓**左右能占

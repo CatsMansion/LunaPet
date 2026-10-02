@@ -90,9 +90,14 @@ print(f"  状态序列：{' → '.join(seq2)}")
 # ⭐ 2026-09-29 修正断言：`stretch_chance` 是概率（默认 0.6），
 #   sleep_out 播完【可以】直接进 idle —— 那是设计允许的，不是失败。
 #   真正要守的契约是：① 必须先播 sleep_out；② 之后必须回到常态循环，且不出别的动作。
-chk("起床链合法（sleep_out → [舒展] → idle/walk）",
+# ⭐ 2026-10-02 再修：允许列表补 `turn_in` / `turn_out`。
+#   实测偶发（1/5）序列 `sleep_out → idle → turn_in → walk` ——
+#   她起床后**转身去走**是合法行为（转身接线 09-28 才加，这条断言当时没跟上），
+#   不是失败。真正要守的仍是：① 必须先播 sleep_out；② 最后回到常态循环。
+chk("起床链合法（sleep_out → [舒展/转身] → idle/walk）",
     seq2[:1] == ["sleep_out"]
-    and all(s in ("sleep_out", "stretch", "land_settle", "idle", "walk") for s in seq2)
+    and all(s in ("sleep_out", "stretch", "land_settle", "idle", "walk",
+                  "turn_in", "turn_out") for s in seq2)
     and pet.state in ("idle", "walk"), f"实际 {seq2}")
 chk("回到了常态循环（idle/walk）", pet.state in ("idle", "walk"), f"实际 {pet.state}")
 chk("asleep 已清", pet.asleep is False)

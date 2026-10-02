@@ -28,6 +28,7 @@ SLOTS = [
     ("laser", "激光笔"),        # ⭐ 鼠标变小红点，她会追过来跳起来抓
     ("teaser", "逗猫棒"),       # 用逗猫棒逗她（播 tease 动作）
     ("bowl", "饭碗"),           # ⭐ 递碗喂食：端起来一口闷，吃完碗空
+    ("brush", "梳子"),          # ⭐ 2026-10-02 梳毛：点一下她会闭眼笑着往梳子上顶
 ]
 # ⭐ 展开高度按槽位数量自适应（⛔ 不要写死 236，加槽位会溢出）
 W_OPEN = 68
@@ -58,8 +59,16 @@ class ToolBar(QWidget):
             print(f"[工具栏] 素材加载失败，退回程序绘制：{e}")
         self._hover_slot = -1
         self._hover_body = False
+        # ⭐⭐ 2026-10-02 Ronny：「我还想要**工具箱可以被拖动**」
+        #   → 拖动状态机：按下柜体后，鼠标移动超过阈值才算"拖"，否则算"点击（展开/收起）"。
+        #   ⛔ 不能只靠 mouseMoveEvent 判断 —— 那样轻点一下柜体也会被当成拖动（她就不展开了）。
+        self._drag_origin = None      # 按下时的全局鼠标位置
+        self._drag_win = None         # 按下时的窗口左上角
+        self._dragging = False
+        self._DRAG_START = 5          # 超过这么多像素才算拖动（px）
         # 贴屏幕左侧、垂直居中偏下
         scr = pet_window.screen().availableGeometry()
+        self._screen = scr
         self._home = QPoint(scr.left() + 4, scr.top() + int(scr.height() * 0.42))
         self.setGeometry(self._home.x(), self._home.y(), W_CLOSED, H_CLOSED)
 
@@ -117,6 +126,18 @@ class ToolBar(QWidget):
 
     # ---------- 交互 ----------
     def mouseMoveEvent(self, ev):
+        # ⭐⭐ 2026-10-02 Ronny：「工具箱**可以被拖动**」
+        #   按下柜体后移动超过阈值 → 进入拖动；否则原地不动（留给"点击展开/收起"）。
+        if self._drag_origin is not None:
+            gp = ev.globalPosition().toPoint()
+            if not self._dragging:
+                if (gp - self._drag_origin).manhattanLength() > self._DRAG_START:
+                    self._dragging = True
+            if self._dragging:
+                nw = self._drag_win + (gp - self._drag_origin)
+                self.move(self._clamp(nw))
+                self._hover_slot, self._hover_body = -1, False
+                return
         if self.open:
             i = self._slot_at(ev.position().toPoint())
         else:
@@ -129,26 +150,54 @@ class ToolBar(QWidget):
             self._hover_body = inside
             self.update()
 
+    def _clamp(self, pt: QPoint) -> QPoint:
+        """拖出屏幕就贴边（⛔ 别让她把工具箱丢到看不见的地方找不回来）"""
+        s = self._screen
+        x = max(s.left(), min(pt.x(), s.right() - self.width()))
+        y = max(s.top(), min(pt.y(), s.bottom() - self.height()))
+        return QPoint(x, y)
+
+    def mouseReleaseEvent(self, ev):
+        if self._drag_origin is None:
+            return
+        was_drag = self._dragging
+        self._drag_origin = None
+        self._drag_win = None
+        self._dragging = False
+        if not was_drag:
+            # 没拖动 → 当成点击：收起态点柜体 = 拉开抽屉；展开态点柜体那一块 = 收回去
+            pos = ev.position().toPoint()
+            if not self.open:
+                self._toggle()
+            elif pos.y() < H_CLOSED:
+                self._toggle()
+            return
+        # 拖完了 → 记住新位置，之后展开/收起都围绕它
+        self._home = self.pos()
+        print("[工具栏] 已拖到 %d,%d" % (self._home.x(), self._home.y()))
+
     def leaveEvent(self, ev):
         self._hover_slot, self._hover_body = -1, False
         self.update()
 
     def mousePressEvent(self, ev):
+        if ev.button() != Qt.LeftButton:
+            return
         pos = ev.position().toPoint()
-        if not self.open:
-            self._toggle()                      # 点柜体 → 拉开抽屉
-            return
-        i = self._slot_at(pos)
-        if i < 0:
-            # 点到抽屉外（柜体那一块）→ 收回去
-            if pos.y() < H_CLOSED:
-                self._toggle()
-            return
-        key = SLOTS[i][0]
-        # ⭐⭐ 2026-09-29 改为「手持式」：点道具 = 继承到鼠标上（光标变成道具），
-        #   拿鼠标去点露娜才施法。比"点一下直接生效"多一个指向动作，沉浸感更强，
-        #   且所有工具共用同一套流程。再点同个道具 / 按 ESC = 放下。
-        self.pet.hold_tool(key)
+        # ⭐ 点道具槽 = 取道具（这个不启动拖动）
+        if self.open:
+            i = self._slot_at(pos)
+            if i >= 0:
+                key = SLOTS[i][0]
+                # ⭐⭐ 2026-09-29 改为「手持式」：点道具 = 继承到鼠标上（光标变成道具），
+                #   拿鼠标去点露娜才施法。再点同个道具 / 按 ESC = 放下。
+                self.pet.hold_tool(key)
+                self.update()
+                return
+        # ⭐ 其余位置（柜体 / 抽屉空白处）→ 启动拖动状态机，松手时再决定是点击还是拖动
+        self._drag_origin = ev.globalPosition().toPoint()
+        self._drag_win = self.pos()
+        self._dragging = False
 
 
     # ---------- 绘制（P0 占位图形；正式素材到位后只换这三个函数） ----------
@@ -162,7 +211,8 @@ class ToolBar(QWidget):
         else:
             self._draw_cabinet(p, w, h, False)
             for i, (key, label) in enumerate(SLOTS):
-                self._draw_slot(p, self._slot_rect(i), key, i == self._hover_slot)
+                self._draw_slot(p, self._slot_rect(i), key, i == self._hover_slot,
+                                taken=self._slot_taken(key))
         p.end()
 
     def _draw_cabinet(self, p: QPainter, w: int, h: int, hover: bool):
@@ -188,8 +238,37 @@ class ToolBar(QWidget):
         hy = body.center().y()
         p.drawRoundedRect(body.center().x() - 9, hy - 3, 18, 6, 3, 3)
 
-    def _draw_slot(self, p: QPainter, r: QRect, key: str, hover: bool):
-        """道具槽：底板 + 图标（⭐ 优先用角色包里的真素材，没有才退回程序绘制）"""
+    def _slot_taken(self, key: str) -> bool:
+        """这个道具是不是**正被拿在手上**（→ 槽位要画成空的）。
+
+        ⭐⭐ 2026-10-02 Ronny：「鼠标点击工具箱里的东西之后鼠标会变成该东西，
+        **然后原来的图标变成一个被拿走之后空的槽位**」
+        """
+        return getattr(self.pet, "_held_tool", None) == key
+
+    def _draw_slot(self, p: QPainter, r: QRect, key: str, hover: bool, taken: bool = False):
+        """道具槽：底板 + 图标（⭐ 优先用角色包里的真素材，没有才退回程序绘制）
+
+        `taken=True` → 画成**空槽**（道具已被拿在手上）。
+        """
+        if taken:
+            # ⭐ 空槽：内凹的暗底 + 虚线边 + 中央淡淡的"空"提示
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(QColor(196, 176, 152)))          # 凹槽底色（比底板暗）
+            p.drawRoundedRect(r, 8, 8)
+            p.setPen(QPen(QColor(150, 122, 96), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r.adjusted(2, 2, -2, -2), 6, 6)
+            # 虚线外框（"这个位置是空的"）
+            pen = QPen(QColor(168, 140, 112), 1.4, Qt.DashLine)
+            pen.setDashPattern([3, 3])
+            p.setPen(pen)
+            p.drawRoundedRect(r.adjusted(4, 4, -4, -4), 5, 5)
+            # 中央一个小凹点
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(QColor(176, 156, 132)))
+            p.drawEllipse(r.center(), 3, 3)
+            return
         p.setPen(QPen(QColor(120, 90, 66), 1))
         p.setBrush(QBrush(QColor(232, 214, 190) if not hover else QColor(255, 240, 214)))
         p.drawRoundedRect(r, 8, 8)

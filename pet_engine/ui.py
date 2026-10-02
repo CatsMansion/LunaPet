@@ -489,6 +489,14 @@ class PetWindow(QWidget):
             self.pet.goal = "seek"
             self.pet._cursor_x = float(QCursor.pos().x())
             return False          # ⭐ 不吃掉点击 → 她还会照常被摸摸
+        if self._held_tool == "brush":
+            # ⭐⭐ 2026-10-02 梳毛（派单 31 的 2/3）：点一下 = 梳一次（播 brush 动作）
+            #   素材：她**闭眼笑 + 头往梳子方向顶**，梳子从画外伸入（14 帧，once）。
+            pet = self.pet
+            if self._has_frames("brush") and not getattr(pet, "asleep", False):
+                pet.play("brush")
+                pet.state_timer = 2.5
+            return True
         if self._held_tool == "teaser":
             # 逗猫棒：点一下 = 逗她一次（播 tease 动作）
             pet = self.pet
