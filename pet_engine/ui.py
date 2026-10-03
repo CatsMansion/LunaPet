@@ -14,7 +14,13 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QPoint
-from PySide6.QtGui import QImage, QPixmap, QTransform, QPainter, QColor, QAction, QIcon, QCursor, QPen
+# ⭐ 2026-10-03 修：平台板身的 `QLinearGradient` 从来没被导入 ——
+#   只要有地形（左右墙）就会进 paintEvent 的这条分支，每帧抛
+#   `NameError: name 'QLinearGradient' is not defined` → **平台画不出来**。
+#   ⛔ 为什么一直没发现：offscreen 自测不画这块（地形测试只断言 body.y），
+#      所以回归全绿但实机是坏的。⭐ 又一次：**回归全绿 ≠ 实机没问题**。
+from PySide6.QtGui import (QImage, QPixmap, QTransform, QPainter, QColor, QAction,
+                           QIcon, QCursor, QPen, QLinearGradient, QBrush)
 from PySide6.QtWidgets import QApplication, QWidget, QSystemTrayIcon, QMenu
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -201,6 +207,16 @@ class PetWindow(QWidget):
         # ⭐⭐⭐ 2026-10-01 地形（猫爬架）：独立窗口，和角色窗口互不相干
         self.terrain_wins: list = []
         for _t in (self.pet.terrains or []):
+            # ⭐⭐ 2026-10-03 Ronny：「把两个墙弄成透明……而不是在桌面上生成丑陋的棕色方块」
+            #   → 新增 `visible`：**碰撞与绘制解耦**。
+            #   `visible: false` = 隐形地形 —— 她照样能爬（core 的碰撞完全不看这个字段），
+            #   但**不生成那个棕色方块窗口**。屏幕边缘本来就是"她爬的是屏幕本身"，
+            #   不该凭空多出一块板子。
+            #   ⭐ 横版关卡里的窗帘 / 柜子这类**看得见**的攀爬物 → `visible: true`。
+            if not _t.get("visible", True):
+                print(f"[地形] {_t.get('label','?')}  x[{_t['x0']:.0f},{_t['x1']:.0f})  "
+                      f"**隐形**（只参与碰撞，不绘制）")
+                continue
             try:
                 _tw = TerrainWindow((_t["x0"], _t["y0"], _t["x1"], _t["y1"]),
                                     _t.get("label", "猫爬架"))
@@ -404,6 +420,14 @@ class PetWindow(QWidget):
                     pass
         self._held_tool = name
         if name is None:
+            # ⭐⭐ 2026-10-02：拿起时统一改成了 setOverrideCursor（应用级），
+            #   ⛔ 放下就**必须**用 restoreOverrideCursor 撤，unsetCursor() 撤不掉
+            #   全局 override —— 那会导致"道具已经放下了，鼠标还是道具形状"。
+            for _ in range(4):      # 循环几次：防止历史上有压了不止一层的情况
+                try:
+                    QApplication.restoreOverrideCursor()
+                except Exception:
+                    break
             self.unsetCursor()
             print("[手持] 已放下工具")
             return
@@ -415,18 +439,76 @@ class PetWindow(QWidget):
         # ⭐⭐ 2026-09-29 激光笔必须用【应用级光标】：红点要全屏跟着鼠标走。
         #   ⛔ 若只用 self.setCursor()，鼠标一离开角色窗口就恢复系统箭头 → 红点消失。
         #   ✅ QApplication.setOverrideCursor 是全局的，整个桌面都显示红点。
-        if name == "laser":
-            try:
-                QApplication.setOverrideCursor(self._make_tool_cursor(name))
-            except Exception:
-                self.setCursor(self._make_tool_cursor(name))
-        else:
+        # ⭐⭐⭐ 2026-10-02 Ronny：「点了之后鼠标就完全变成该图标」——
+        #   ⛔ 之前**只有 laser** 走应用级，其他五个道具走 self.setCursor()（窗口级），
+        #   表现就是"只有鼠标压在露娜身上才是道具图标，移出去就变回普通箭头"。
+        #   → 现在**所有**道具统一走 setOverrideCursor，全桌面都是道具形状。
+        try:
+            QApplication.setOverrideCursor(self._make_tool_cursor(name))
+        except Exception:
             self.setCursor(self._make_tool_cursor(name))
 
+    # ⭐⭐ 2026-10-02 各道具光标的**热点**（= 光标尖端在图内的像素位置）
+    #   光标 hotspot 决定"她认为红点/道具在哪" —— ⛔ 偏移了她会追错位置。
+    #   素材是 2x 画的，这里按 2x 存整数，放大时正好 2:1。
+    _TOOL_HOTSPOT = {
+        "wand":   (20, 76),
+        "teaser": (20, 80),
+        # ⭐ 2026-10-02 派单 34：pillow 用【正中心】(执行端建议 + 我同意) ——
+        #   枕头是"放到她头上让她睡"的道具，视觉落点该在**枕面中央**而不是某个角；
+        #   居中还不依赖枕头本身的长宽比，换朝向也不会偏。
+        "pillow": (44, 44),
+        "brush":  (24, 78),
+        "bowl":   (56, 46),
+        "laser":  (44, 44),      # ⭐ 正中心（Ronny 构思：她追的就是红点本身）
+    }
+
     def _make_tool_cursor(self, name: str):
-        """把工具画成鼠标光标（P0 占位图形；正式素材到位后换成 QPixmap(图片)）。"""
+        """把工具画成鼠标光标。
+
+        ⭐⭐ 2026-10-02 Ronny：「点了之后鼠标就完全变成该图标」。
+        → 优先用**角色包里的真素材** `ui/<key>.png` 缩成 44×44；
+          素材没有才回落程序绘制（占位）。
+        ⛔ laser 例外：它要的是**红点**不是"笔"，程序画的红点带光晕，
+          所以 laser 永远走程序绘制。
+        """
         from PySide6.QtGui import QPixmap, QPainter as _P, QPen as _Pen, QBrush as _B, QCursor as _C
-        pm = QPixmap(44, 44)
+        SZ = 44
+        hot = self._TOOL_HOTSPOT.get(name, (SZ // 2, SZ // 2))
+
+        # ---------- ① 优先用真素材 ----------
+        # ✅✅ 2026-10-02 派单 34：新 pillow.png 已重出并装机（1/3 一次过），
+        #   素面米白长方形软枕，不再是派 → 本路径现在**六个道具全走真素材**。
+        # ⛔ 本屏蔽名单与 ui_toolbar._draw_slot 里的是**同一份规则的两个副本** ——
+        #   当初只改了那边、漏了光标这条路（Ronny 反馈"点了光标没变化"）。
+        #   ⭐ **下次往里加/删任何 key，必须两处一起改**（全局搜 `_BAD_ASSET`）。
+        #   ⭐ laser 例外：它要的是"红点"不是"笔"，永远走下方 ② 程序绘制。
+        _BAD_ASSET: set = set()
+        if name != "laser" and name not in _BAD_ASSET:
+            src = None
+            try:
+                sp = os.path.join(self.pack.root, "ui", f"{name}.png")
+                if os.path.isfile(sp):
+                    _pm = QPixmap(sp)
+                    if not _pm.isNull():
+                        src = _pm
+            except Exception:
+                src = None
+            if src is not None:
+                pm = QPixmap(SZ, SZ)
+                pm.fill(Qt.transparent)
+                g = _P(pm)
+                g.setRenderHint(_P.SmoothPixmapTransform)
+                # 素材按 88×88(2x) 等比缩进 44×44，保持 hotspot 比例
+                k = min(SZ / src.width(), SZ / src.height())
+                w2, h2 = max(1, int(src.width() * k)), max(1, int(src.height() * k))
+                g.drawPixmap((SZ - w2) // 2, (SZ - h2) // 2,
+                             src.scaled(w2, h2, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                g.end()
+                return _C(pm, int(hot[0] * SZ / 88), int(hot[1] * SZ / 88))
+
+        # ---------- ② 回落：程序绘制 ----------
+        pm = QPixmap(SZ, SZ)
         pm.fill(Qt.transparent)
         g = _P(pm)
         g.setRenderHint(_P.Antialiasing)
@@ -460,14 +542,37 @@ class PetWindow(QWidget):
             g.drawEllipse(26, 2, 14, 14)
             g.setBrush(_B(QColor(200, 160, 90)))
             g.drawEllipse(24, 10, 10, 10)
-            g.end()
-            return _C(pm, 8, 40)
+        elif name == "pillow":
+            # 兜底：素材缺失时才走。✅ 正常路径已用真素材（派单 34 装机后）。
+            # ⛔ ⛔ 别再拿 packs/luna/ui/pillow.png 当"错素材"的例子了 ——
+            #   那张**已经是新的真枕头**了（旧版画的是派，已于 2026-10-02 替换）。
+            g.setPen(_Pen(QColor(150, 126, 104), 2))
+            g.setBrush(_B(QColor(240, 228, 214)))
+            g.drawRoundedRect(4, 12, 36, 24, 10, 10)
+            g.setPen(_Pen(QColor(196, 176, 152), 1))
+            g.drawRoundedRect(10, 17, 24, 14, 6, 6)
+        elif name == "brush":
+            # 梳子：木柄 + 齿
+            g.setPen(_Pen(QColor(120, 82, 54), 6, Qt.SolidLine, Qt.RoundCap))
+            g.drawLine(8, 40, 30, 12)
+            g.setPen(_Pen(QColor(90, 66, 48), 2))
+            for _i in range(4):
+                g.drawLine(30 - _i * 4, 12 - _i * 3, 26 - _i * 4, 8 - _i * 3)
+        elif name == "bowl":
+            # 饭碗：碗体 + 碗沿 + 猫粮
+            g.setPen(_Pen(QColor(120, 90, 66), 2))
+            g.setBrush(_B(QColor(236, 214, 190)))
+            g.drawRoundedRect(4, 18, 36, 20, 5, 5)
+            g.setPen(Qt.NoPen)
+            g.setBrush(_B(QColor(168, 110, 62)))
+            g.drawEllipse(14, 19, 16, 7)
         else:
+            # 兜底：未知道具 → 灰色小方块（⛔ 不要和任何具体道具重名）
             g.setPen(_Pen(QColor(180, 180, 190), 2))
             g.setBrush(_B(QColor(246, 246, 250)))
             g.drawRoundedRect(4, 20, 36, 20, 8, 8)
         g.end()
-        return _C(pm, 8, 38) if name == "wand" else _C(pm)
+        return _C(pm, int(hot[0] * SZ / 88), int(hot[1] * SZ / 88))
 
     def act_with_tool(self, right: bool) -> bool:
         """在角色身上施用当前手持的工具。返回是否消费了这次点击。"""
@@ -476,8 +581,11 @@ class PetWindow(QWidget):
             return True
         if self._held_tool == "pillow":
             self._sleep_via_tool()
-            self._held_tool = None
-            self.unsetCursor()
+            # ⭐⭐ 2026-10-02：⛔ 不要手写 `_held_tool=None; unsetCursor()` ——
+            #   拿起时走的是**应用级** setOverrideCursor，unsetCursor() 撤不掉，
+            #   结果就是"枕头已经用完放下了，鼠标还是枕头形状"。
+            #   → 一律走 hold_tool(None)，它才是唯一的光标出口。
+            self.hold_tool(None)
             return True
         if self._held_tool == "laser":
             # ⭐⭐ 2026-09-29 激光笔（Ronny 构思）：

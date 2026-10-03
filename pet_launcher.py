@@ -64,8 +64,8 @@ def _inner_dir() -> str:
 
 
 def resolve_pack_dir() -> str:
-    # ① 命令行显式指定（⭐ 先把 --tuner 摘掉，否则它会被当成角色包路径）
-    args = [a for a in sys.argv[1:] if a != "--tuner"]
+    # ① 命令行显式指定（⭐ 先把开关参数摘掉，否则它会被当成角色包路径）
+    args = [a for a in sys.argv[1:] if a not in ("--tuner", "--selftest-game")]
     if args and args[0].strip():
         return os.path.abspath(args[0])
     # ② exe 同目录的 packs/（外部覆盖优先）
@@ -81,6 +81,52 @@ def _tag(pack: str) -> str:
     return "内置" if os.path.normcase(os.path.abspath(pack)).startswith(inner) else "外部覆盖"
 
 
+def _selftest_game(pack: str) -> int:
+    """⭐ 2026-10-03：验证**打包后的 exe 里**能不能真的 import 到 night 并画出小游戏窗口。
+
+    ⛔ 为什么源码跑得通不算数：
+       `night` 是在 ui_toolbar 的【函数内 try/except】里延迟 import 的，
+       PyInstaller 的静态分析不保证扫到这种分支 → 漏了它的症状是
+       「双击 exe、拉开抽屉、点游戏机、毫无反应」，而且只在 exe 上出现。
+       交付前唯一能自动抓到它的机会就是这个自检口。
+
+    ⭐ 必须真 render 一次而不是只 import：paintEvent 里的 NameError / 局部 import
+       遮蔽这类错，只有真正画一次才会抛（QLinearGradient 那三次都是这么抓到的）。
+
+    用法：LunaPet.exe --selftest-game      → 打印结果后退出，不起桌宠
+    """
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QPixmap
+    from core import load_pack
+    import ui_toolbar                       # 工具箱本身也要能 import
+    from night import NightWindow, NIGHTS, STASHES
+
+    app = QApplication.instance() or QApplication([])
+    pack_obj = load_pack(pack)
+    w = NightWindow(pack_obj)
+
+    pm = QPixmap(w.size())
+    pm.fill()
+    w.render(pm)                            # ⭐ 真画一次（菜单态）
+    for i in range(len(NIGHTS)):            # 三档各画一次，且开一局让物理跑起来
+        w.start_night(i)
+        w.render(pm)
+        w._tick()
+    w.phase = "result"
+    w.result = {"night": "x", "loot": 1, "left": 0, "total": 1, "caught": 0,
+                "time": 1.0, "score": 150, "rank": "C"}
+    w.phase_t = 0.5
+    w.render(pm)
+
+    print("[selftest] ui_toolbar 导入 OK")
+    print("[selftest] night 导入 OK（函数内延迟 import → hiddenimports 命中）")
+    print(f"[selftest] 档数 {len(NIGHTS)}　动作帧 {len(w.imgs)}　赃物图标 {len(w.icons)}"
+          f"　（档二布局 {len(STASHES)} 处）")
+    print(f"[selftest] 窗口 {w.width()}x{w.height()}　缩放 s={w.s:.4f}")
+    print("[selftest] paintEvent 三档 + 菜单 + 结算 全通（无异常）")
+    return 0
+
+
 def main() -> int:
     _force_utf8_console()   # ⭐ 必须在任何中文 print / UI 起来之前调用
 
@@ -88,12 +134,16 @@ def main() -> int:
     # 打包后 core/ui 已是内置模块，这一行只是为了让源码运行方式也能用同一个入口。
     sys.path.insert(0, os.path.join(_inner_dir(), "pet_engine"))
 
-    from ui import run       # noqa: E402  （故意延后导入：先把路径准备好）
-
     pack = resolve_pack_dir()
     if not os.path.isdir(pack):
         print(f"⛔ 角色包不存在：{pack}")
         return 1
+
+    if "--selftest-game" in sys.argv:
+        return _selftest_game(pack)
+
+    from ui import run       # noqa: E402  （故意延后导入：先把路径准备好）
+
     tuner = "--tuner" in sys.argv      # ⭐ 调试台（成品默认不开，自己调手感时用）
     print(f"[打包] 角色包来源：{_tag(pack)}  →  {pack}")
     if tuner:

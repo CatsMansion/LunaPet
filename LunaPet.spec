@@ -8,21 +8,26 @@
 ⭐ 为什么选 --onedir 而不是 --onefile（两种都真打出来量过，不是猜的）：
 
                体积        冷启动(同机热缓存)      距 5 秒判定线的余量
-    onedir     98.6 MB 目录    0.84 s              6 倍
+    onedir     146 MB 目录     —                6 倍
     onefile    50.7 MB 单文件  3.11 ~ 3.54 s       1.4 倍
 
     onefile 确实更小、更方便发一个文件，但它**每次启动**都要把包里那 ~98MB
-    解压到 %TEMP% 再跑，实测光解压就占掉 2.4~2.8 秒；这点余量在慢机械盘或
-    被杀软实时扫描的机器上很容易破线。onedir 只有第一次读盘稍慢（3.49 秒），
+    解压到 %TEMP% 再跑（实测占 2.4~2.8 秒）；这点余量在慢机械盘或
+    被杀软实时扫描的机器上很容易破线。onedir 只有第一次读盘稍慢，
     之后稳定 0.9 秒左右。所以交付用 onedir。
     想换成 onefile：把下面 EXE() 的 exclude_binaries 改成 False、把 a.binaries /
     a.datas 直接传给 EXE()，并删掉 COLLECT()。
+【 2026-10-03 实测更新 】onedir = **146 MB** / zip **99.1 MB**。
+    （之前记的 98.6 MB 是 194 帧时代，现在 411 帧 + 31 个 UI 图标。）
+    exe 一次完整流程（进程启动 + PySide6 初始化 + 110 帧解码 +
+    5 次 1280x720 渲染 + 三档开局）= **1.03 秒**，用 `LunaPet.exe --selftest-game` 测。
 """
 import os
 
 ROOT = SPECPATH          # PyInstaller 注入：spec 所在目录（= 项目根）
 
 NAME = "LunaPet"
+PACK = "luna"                   # 要打进包的角色包名（= packs 下的目录名）
 
 # ① 是否保留控制台窗口
 #    True  → 双击后会带一个黑窗口，能看到 [引擎]/[轮廓]/[帧] 等日志（排查问题用）
@@ -136,14 +141,51 @@ if not KEEP_SOFTWARE_OPENGL:
 # ============================================================================
 # Analysis
 # ============================================================================
+# ============================================================================
+# ⛔ ⛔ 角色包打包清单（2026-10-03 改）
+#
+# 为什么不能再整个 packs/ 塞进去：
+#     packs/luna/_备份/ 是历次动作备份（313 MB）——tease 512 版、各版安装前快照都在里面。
+#     用户不会用到它，而它让交付包从 ~150MB 翻到 459MB（实测）。
+# ⛔ 另外：保留了 _备份 就等于把开发过程的中间产物一起交给用户。
+# ✅ 改成白名单：只打 action / ui / pet.json / presets 四项。
+#     加新角色包时，记得来这里加一行（否则新角色的材料不会进包）。
+# ============================================================================
+# ⛔⛔ PyInstaller 的 datas 第二个元素是「目标目录」，不是「目标文件路径」。
+#     我第一版将单文件的 dest 写成了 "packs/luna/pet.json"，结果它被塞进了
+#     `packs/luna/pet.json/` 这个目录里（实测路径变成了 pet.json/pet.json），
+#     打包不报错、但运行时 PermissionError。
+#     原 spec 用整目录 "<packs>, 'packs'" 时不会暴露，改白名单才出现。
+#     → 单文件的 dest 必须给「它要停的目录」；目录项才用子目录名。
+_PACK_DATAS = []
+for _rel in ("action", "ui", "presets"):
+    _src = os.path.join(ROOT, "packs", PACK, _rel)
+    if os.path.isdir(_src):
+        _PACK_DATAS.append((_src, os.path.join("packs", PACK, _rel)))
+_pj = os.path.join(ROOT, "packs", PACK, "pet.json")
+if os.path.isfile(_pj):
+    _PACK_DATAS.append((_pj, os.path.join("packs", PACK)))   # ← 目标是目录，不是文件名
+
 a = Analysis(
     [os.path.join(ROOT, "pet_launcher.py")],          # 打包入口（不动 run.py/core.py/ui.py）
     pathex=[os.path.join(ROOT, "pet_engine")],        # 让 core / ui 能被找到
     binaries=[],
     # ⭐ 角色包整个塞进包里 → 用户双击 exe 就能看到宠物，不需要额外放文件
-    datas=[(os.path.join(ROOT, "packs"), "packs")],
-    # core.py / ui.py 在 pet_engine/ 下，是被 run.py 以顶层模块名导入的，静态分析看不到
-    hiddenimports=["ui", "core", "pet_engine.console", "console"],
+    datas=_PACK_DATAS,
+    # core.py / ui.py / ui_toolbar.py / night.py 都在 pet_engine/ 下，是被 run.py 以【顶层模块名】
+    # 导入的（run.py 把 pet_engine 塞进 sys.path），静态分析看不到 → 必须逐个点名。
+    #
+    # ⛔ 2026-10-03：`ui_toolbar` 和 `night` 原先不在清单里，exe 里的工具箱能用属于**运气**
+    #   （`from ui_toolbar import ToolBar` 恰好被扫到了）。而 night 更险 —— 它在 ui_toolbar 里是
+    #   【函数内 try/except 里的延迟 import】，静态分析不保证扫到。漏了它的症状是：
+    #   源码能玩、打包后点游戏机毫无反应。
+    #   ✅ 凡是"函数内 import"或"只在某个分支里 import"的模块，一律显式列进来。
+    hiddenimports=[
+        "ui", "core",
+        "ui_toolbar",          # 工具箱
+        "night",               # ⭐ 小游戏（函数内延迟 import）
+        "pet_engine.console", "console",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -179,6 +179,10 @@ def _resolve_terrain(t: dict, screen: Tuple[int, int, int, int]) -> dict:
             # ⭐ 爬升触发的水平容差（见 `_terrain_climb`）：梯子贴边时她被屏幕边界挡在外面，
             #   没有这个容差就永远触发不了爬升。
             "climb_reach": float(t.get("climb_reach") or 0.0),
+            # ⭐ 2026-10-03：`visible` 只影响**绘不绘制**，⛔ 碰撞逻辑一律不看这个字段。
+            #   `false` = 隐形地形（屏幕边缘的攀爬区：她爬的是屏幕本身，不该有块板子）
+            #   ⭐ 横版里的窗帘 / 柜子这类看得见的攀爬物 → `true`
+            "visible": bool(t.get("visible", True)),
             "label": t.get("label", "猫爬架")}
 
 

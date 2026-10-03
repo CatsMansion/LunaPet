@@ -14,7 +14,7 @@ P0 阶段先用**程序绘制的占位图形**把链路跑通（收纳柜 → �
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QRect, QPoint, QTimer
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QLinearGradient
 from PySide6.QtWidgets import QWidget
 
 # 收起 / 展开 两种尺寸（贴屏幕左边缘，垂直居中）
@@ -29,7 +29,15 @@ SLOTS = [
     ("teaser", "逗猫棒"),       # 用逗猫棒逗她（播 tease 动作）
     ("bowl", "饭碗"),           # ⭐ 递碗喂食：端起来一口闷，吃完碗空
     ("brush", "梳子"),          # ⭐ 2026-10-02 梳毛：点一下她会闭眼笑着往梳子上顶
+    ("gamepad", "游戏机"),      # ⭐⭐ 2026-10-03 入口：点一下打开「夜间冒险」
 ]
+
+# ⭐⭐ 入口类槽位 vs 道具槽位（2026-10-03）
+#   道具 = 拿在手上、光标变成它、去点露娜才施法（wand/pillow/laser/teaser/bowl/brush）
+#   入口 = 点了直接开窗口，不占光标（gamepad）
+#   ⛔ 混为一谈的下场：点游戏机会先把光标变成手柄，还得再点一次露娜才开 —— 多此一举。
+#      ️同理，入口类不该画成"被拿走的空槽"（它没被拿走，它就在那儿）。
+_ENTRY_SLOTS = {"gamepad"}
 # ⭐ 展开高度按槽位数量自适应（⛔ 不要写死 236，加槽位会溢出）
 W_OPEN = 68
 H_OPEN = H_CLOSED + SLOT_H * len(SLOTS) + 6
@@ -111,6 +119,78 @@ class ToolBar(QWidget):
             pass
         print("[手持] 关闭抽屉 → 自动放下道具")
 
+    # ---------- 入口类槽位 ----------
+    def _open_entry(self, key: str):
+        """点入口类槽位 → 打开对应的独立窗口。
+
+        ⭐ 三个必须处理对的细节：
+          ① **延迟 import**：`ui → ui_toolbar → night → ui` 会成环，
+             顶层 import night 直接 ModuleNotFoundError。
+          ② **重复点**：复用同一个窗口（raise + activate），⛔ 不然每点一次开一个。
+          ③ **C++ 侧已析构**：窗口被关掉后 Python 引用还在，直接 .show() 抛
+             RuntimeError("Internal C++ object already deleted")，要重新建。
+        """
+        if key != "gamepad":
+            return
+        # ⭐ 双通道 import，且**优先复用已加载的模块**：
+        #   run.py 和打包后的 exe 都把 pet_engine 当作顶层模块目录（`from night import`
+        #   才是那条一直成立的路），`.night` 只在测试脚本用 `from pet_engine import …` 时才成立。
+        #   → 顺序是 night → .night。反过来写的话，exe 每次都要先撞一次 ImportError。
+        #   ⛔ 无论哪条路，night 都必须写进 spec 的 hiddenimports —— 它是函数内 import，
+        #      静态分析不保证扫到（工具箱 ui_toolbar 当初也没在清单里，属于运气好）。
+        import sys as _sys
+        NightWindow = None
+        for _name in ("night", "pet_engine.night"):
+            _m = _sys.modules.get(_name)
+            if _m is not None and hasattr(_m, "NightWindow"):
+                NightWindow = _m.NightWindow
+                break
+        if NightWindow is None:
+            try:
+                from night import NightWindow         # type: ignore
+            except ImportError:
+                try:
+                    from .night import NightWindow    # type: ignore
+                except Exception as e:
+                    print(f"[夜间] 模块加载失败：{type(e).__name__}: {e}")
+                    return
+        if NightWindow is None:
+            return
+
+        w = getattr(self, "_night", None)
+        if w is not None:
+            try:
+                w.show()
+                w.raise_()
+                w.activateWindow()
+                return
+            except RuntimeError:
+                w = None                     # 已被 C++ 析构 → 重建
+
+        try:
+            self._night = NightWindow(self.pet.pack)
+        except Exception as e:
+            print(f"[夜间] 打不开：{type(e).__name__}: {e}")
+            return
+        # ⭐ 关掉即销毁，好让 destroyed 信号把工具栏放回来
+        self._night.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._night.destroyed.connect(self._on_night_closed)
+        self._night.show()
+        # ⭐ 抽屉是 WindowStaysOnTopHint，会一直压在游戏窗口上面挡住画面。
+        #   进游戏期间先藏起来，退出游戏再放回来。
+        self._drop_held_tool()
+        self.hide()
+        print("[夜间] 已进入：深夜厨房")
+
+    def _on_night_closed(self, *_):
+        self._night = None
+        try:
+            self.show()
+            self._home = self.pos()          # 期间可能没动，保险同步一次
+        except Exception:
+            pass
+        print("[夜间] 已退出")
+
     def _slot_rect(self, i: int) -> QRect:
         """展开后第 i 个道具的矩形（从顶部往下排，顶部留出柜体）"""
         top = H_CLOSED - 6
@@ -189,6 +269,11 @@ class ToolBar(QWidget):
             i = self._slot_at(pos)
             if i >= 0:
                 key = SLOTS[i][0]
+                if key in _ENTRY_SLOTS:
+                    # ⭐ 入口类：直接开窗口，不进"手持"状态（它不施法，它是个入口）
+                    self._open_entry(key)
+                    self.update()
+                    return
                 # ⭐⭐ 2026-09-29 改为「手持式」：点道具 = 继承到鼠标上（光标变成道具），
                 #   拿鼠标去点露娜才施法。再点同个道具 / 按 ESC = 放下。
                 self.pet.hold_tool(key)
@@ -219,9 +304,13 @@ class ToolBar(QWidget):
         """柜体：⭐ 有 cabinet 素材优先用，否则程序绘制（占位）"""
         pm = self.icons.get("cabinet") or self.icons.get("抽屉") or self.icons.get("柜子")
         if pm is not None:
-            s = min(w - 4, min(h, H_CLOSED) - 4)
-            pm2 = pm.scaled(s, s, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            p.drawPixmap((w - pm2.width()) // 2, 2, pm2)
+            # ⭐ 2026-10-02：素材是 136×156（= 68×78 的精确 2x），按**柜体区域**铺满，
+            #   不要缩进 min(w,h) 的方框 —— 那会把 68×78 压成 56×64，两侧空 6px。
+            body = QRect(2, 2, w - 4, min(h, H_CLOSED) - 4)
+            pm2 = pm.scaled(body.width(), body.height(),
+                            Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            p.drawPixmap(body.left() + (body.width() - pm2.width()) // 2,
+                         body.top() + (body.height() - pm2.height()) // 2, pm2)
             return
         # 兜底：程序绘制
         body = QRect(2, 2, w - 4, min(h, H_CLOSED) - 4)
@@ -243,7 +332,12 @@ class ToolBar(QWidget):
 
         ⭐⭐ 2026-10-02 Ronny：「鼠标点击工具箱里的东西之后鼠标会变成该东西，
         **然后原来的图标变成一个被拿走之后空的槽位**」
+
+        ⛔ 入口类槽位（gamepad）**永远不画成空槽** —— 它没被拿走，它就在那儿。
         """
+        key = str(key)
+        if key in _ENTRY_SLOTS:
+            return False
         return getattr(self.pet, "_held_tool", None) == key
 
     def _draw_slot(self, p: QPainter, r: QRect, key: str, hover: bool, taken: bool = False):
@@ -251,8 +345,20 @@ class ToolBar(QWidget):
 
         `taken=True` → 画成**空槽**（道具已被拿在手上）。
         """
-        if taken:
-            # ⭐ 空槽：内凹的暗底 + 虚线边 + 中央淡淡的"空"提示
+        # ⭐⭐ 2026-10-02 派单 33 素材装机：slot.png / slot_taken.png 是**精确 2x**
+        #   （112×124 → 槽位 56×62），所以直接按槽位尺寸 1:2 画，不做二次缩放
+        #   ——二次缩放会糊掉 2px 描边。两张素材 alpha 轮廓 XOR 仅 0.205%，
+        #   拿起/放回时底板不会跳。
+        _plate = self.icons.get("slot_taken" if taken else "slot")
+        if _plate is not None:
+            p.drawPixmap(r, _plate, QRect(0, 0, _plate.width(), _plate.height()))
+            if hover and not taken:
+                # 悬停高亮：素材是静态的，用一层暖色叠加代替程序版的换色
+                p.setPen(Qt.NoPen)
+                p.setBrush(QBrush(QColor(255, 226, 170, 70)))
+                p.drawRoundedRect(r, 16, 16)
+        elif taken:
+            # 兜底：程序绘制的空槽（内凹暗底 + 虚线边 + 中央凹点）
             p.setPen(Qt.NoPen)
             p.setBrush(QBrush(QColor(196, 176, 152)))          # 凹槽底色（比底板暗）
             p.drawRoundedRect(r, 8, 8)
@@ -269,17 +375,20 @@ class ToolBar(QWidget):
             p.setBrush(QBrush(QColor(176, 156, 132)))
             p.drawEllipse(r.center(), 3, 3)
             return
-        p.setPen(QPen(QColor(120, 90, 66), 1))
-        p.setBrush(QBrush(QColor(232, 214, 190) if not hover else QColor(255, 240, 214)))
-        p.drawRoundedRect(r, 8, 8)
+        else:
+            # 兜底：程序绘制的普通底板
+            p.setPen(QPen(QColor(120, 90, 66), 1))
+            p.setBrush(QBrush(QColor(232, 214, 190) if not hover else QColor(255, 240, 214)))
+            p.drawRoundedRect(r, 8, 8)
         cx, cy = r.center().x(), r.center().y()
 
-        # ⛔⛔ 2026-09-29 Ronny 目检：「枕头有点看着不像枕头」
-        #   查明：packs/luna/ui/pillow.png 画的其实是**派/馅饼**（棕饼皮 + 奶油馅 +
-        #        中央核 + 放射纹），不是枕头。⚠️ pillow 的素材还在派单队列里没重出，
-        #        重出之前**必须屏蔽这张错素材**，否则程序绘制的真枕头永远不生效。
-        #   ✅ 等新 pillow.png 装机后，把 "pillow" 从本集合里删掉即可。
-        _BAD_ASSET = {"pillow"}
+        # ✅✅ 2026-10-02 派单 34：新 pillow.png 已重出并装机（1/3 一次过），
+        #   素面米白长方形软枕、四角圆、边上一圈缝线，**不再是派**。
+        #   ⛔ 本屏蔽名单与 ui.py `_make_tool_cursor` 里的是**同一份规则的两个副本** ——
+        #   当初只改了这里、漏了光标那边（Ronny 反馈"点了没变化"）。
+        #   ⭐ **下次往里加/删任何 key，必须两处一起改**（全局搜 `_BAD_ASSET`）。
+        #   ✅ 目前为空 —— 六个道具全部使用真素材。
+        _BAD_ASSET: set = set()
         pm = None if key in _BAD_ASSET else self.icons.get(key)
         if pm is not None:
             # 等比缩到槽内（留 8px 内边距），居中绘制
@@ -360,9 +469,56 @@ class ToolBar(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QBrush(QColor(255, 255, 255, 210)))
             p.drawEllipse(cx - 13, cy - 8, 7, 5)
+        elif key == "gamepad":
+            # ⭐ 2026-10-03「游戏机」入口（⛔ packs/luna/ui 里还没有 gamepad.png，先程序绘制）
+            #   识别特征 = 手柄剪影：左右两个握把 + 左侧十字键 + 右侧两颗圆按钮。
+            #   不要画成电视/街机 —— 那是"机"，手柄才像"能拿去玩的东西"。
+            from PySide6.QtGui import QPainterPath
+            from PySide6.QtCore import QPointF
+            p.setPen(Qt.NoPen)
+            # ① 投影
+            p.setBrush(QBrush(QColor(20, 22, 34, 70)))
+            p.drawRoundedRect(cx - 20, cy - 6, 40, 22, 11, 11)
+            # ② 手柄主体：中间窄、两端鼓的蝴蝶形
+            path = QPainterPath()
+            T, Bt = cy - 11.0, cy + 11.0
+            path.moveTo(cx - 20, cy - 2)
+            path.cubicTo(cx - 21, T, cx - 13, T - 2, cx - 6, T)
+            path.cubicTo(cx - 2, T - 3, cx + 2, T - 3, cx + 6, T)
+            path.cubicTo(cx + 13, T - 2, cx + 21, T, cx + 20, cy - 2)
+            path.cubicTo(cx + 20, Bt, cx + 12, Bt + 3, cx + 7, Bt - 1)
+            path.cubicTo(cx + 4, Bt - 5, cx - 4, Bt - 5, cx - 7, Bt - 1)
+            path.cubicTo(cx - 12, Bt + 3, cx - 20, Bt, cx - 20, cy - 2)
+            path.closeSubpath()
+            grad = QLinearGradient(QPointF(0, T), QPointF(0, Bt))
+            grad.setColorAt(0.0, QColor(126, 132, 152))
+            grad.setColorAt(1.0, QColor(74, 78, 98))
+            p.setPen(QPen(QColor(46, 48, 64), 1.6))
+            p.setBrush(QBrush(grad))
+            p.drawPath(path)
+            # ③ 左侧十字方向键
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(QColor(40, 44, 58)))
+            p.drawRoundedRect(cx - 16, cy - 4, 11, 4, 1.5, 1.5)
+            p.drawRoundedRect(cx - 12.5, cy - 8, 4, 11, 1.5, 1.5)
+            # ④ 右侧两颗圆按钮（红 / 黄）
+            p.setBrush(QBrush(QColor(232, 92, 92)))
+            p.drawEllipse(QPointF(cx + 9, cy - 2), 3.6, 3.6)
+            p.setBrush(QBrush(QColor(246, 200, 92)))
+            p.drawEllipse(QPointF(cx + 15, cy + 2), 3.6, 3.6)
+            # ⑤ 中间两颗小键 + 顶部高光
+            p.setBrush(QBrush(QColor(56, 60, 76)))
+            p.drawEllipse(QPointF(cx - 3, cy + 1), 2.2, 2.2)
+            p.drawEllipse(QPointF(cx + 3, cy + 1), 2.2, 2.2)
+            p.setPen(QPen(QColor(255, 255, 255, 120), 1.8, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(cx - 13, cy - 8, cx - 4, cy - 9)
+            return
         elif key == "bowl":
             # 饭碗：敞口碗 + 碗口食团 + 碗足 + 高光
-            from PySide6.QtGui import QPainterPath, QLinearGradient
+            # ⛔ QLinearGradient 已在模块级导入，这里⛔⛔ 不要重复 `from ... import` ——
+            #    函数内 import 会把它降级成【局部变量】，只有走到这一行才有值，
+            #    排在这一行之前的分支（gamepad）会 UnboundLocalError。
+            from PySide6.QtGui import QPainterPath
             from PySide6.QtCore import QPointF
             # ① 碗身：上宽下窄的梯形，底圆
             path = QPainterPath()
@@ -397,4 +553,12 @@ class ToolBar(QWidget):
 
     # ---------- 托盘/退出时清掉 ----------
     def closeEvent(self, ev):
+        # ⭐ 2026-10-03：工具栏没了（= 退出桌宠）时，游戏窗口不该继续飘在那儿
+        w = getattr(self, "_night", None)
+        if w is not None:
+            try:
+                w.close()
+            except RuntimeError:
+                pass
+            self._night = None
         ev.accept()

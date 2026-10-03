@@ -32,9 +32,21 @@ def check(label, cond, detail=""):
 app = QApplication.instance() or QApplication(sys.argv)
 pack = load_pack(os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs", "luna"))
 w = PetWindow(pack)
-# ⭐ 2026-10-01：本测试只管互动，关掉地形 —— offscreen 屏幕只有 800x800，
-#    地形会横在屏幕中间，她走过去会被拉去爬墙，干扰走路类断言。
+# ⭐ 2026-10-01：本测试只管互动，关掉地形 —— 地形会横在屏幕中间，
+#    她走过去会被拉去爬墙，干扰走路类断言。
 w.pet.terrains = []
+# ⭐⭐ 2026-10-02：offscreen 虚拟屏只有 800×800，而下面「目标导向」用例把目标设在
+#    x=1500 —— 超出屏幕，`clamp_to_screen` 每帧把她拽回 800 以内，必然走不到。
+#    ⛔ 这不是产品 bug，是测试环境尺寸不足。⭐规矩：**屏幕尺寸不足时显式改
+#    screen_rect**，不许改断言去迁就虚拟屏。
+#    改完必须同步 pet.screen（它是 clamp 的唯一依据）与地形（虽然本用例清了地形）。
+_BIG = (0, 0, 1920, 1080)
+w.screen_rect = _BIG
+w.pet.screen = _BIG
+w.pet.body.x = 480.0
+w.pet.body.y = 1080.0
+w.move(_BIG[0], _BIG[1] - 560)
+print(f"[测试环境] screen_rect 改为 {_BIG}（offscreen 虚拟屏只有 800×800）")
 
 n_ok = 0
 print("=== ⭐ 点击 = 摸摸（合成真实鼠标事件）===")
