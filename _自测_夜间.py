@@ -79,6 +79,16 @@ def render():
 
 OK, BAD = [], []
 
+# ⭐ 2026-10-03 比例重排后：测试里的坐标不再写死，全部从 night 派生。
+#   下面这些是旧布局（470/320/552/700）的替身，新布局见 night.py 的 PLATFORMS/LADDERS。
+FLOOR   = N.FLOOR_Y          # 672
+COUNTER = N.PLATFORMS[2][1] # 料理台顶 375
+TABLE   = N.PLATFORMS[1][1] # 餐桌顶 474
+HANGER  = N.PLATFORMS[3][1] # 吊柜顶 177
+LADX    = N.LADDERS[0][0]    # 梯子 x 620
+LADTOP  = N.PLATFORMS[2][1] # 梯子顶 = 料理台 375
+
+
 
 def chk(name, cond, info=""):
     (OK if cond else BAD).append(name)
@@ -100,11 +110,18 @@ print("=" * 72)
 print("② 重力与落地")
 print("=" * 72)
 l = w.luna
-l.x, l.y = 300.0, 200.0
+l.x, l.y = 120.0, 200.0            # ⭐ x=120：餐桌在 300~470，落点必须避开它
 l.vx = l.vy = 0.0
 step_pure(1 / 60, 90)                 # 1.5s 自由落体
 chk("落到地板", abs(l.y - N.FLOOR_Y) < 1.0, f"y={l.y:.1f} 期望 {N.FLOOR_Y}")
 chk("落地后 on_ground", l.on_ground)
+
+# ⭐ 餐桌是矮平台：站在它上方自由落体会被接住（Ronny 10-03 加的）
+l.x, l.y = 380.0, 200.0
+l.vx = l.vy = 0.0
+l.on_ground = False
+step_pure(1 / 60, 90)
+chk("餐桌能接住落下来的人", abs(l.y - TABLE) < 1.0, f"y={l.y:.1f} 期望 552")
 
 print()
 print("=" * 72)
@@ -136,7 +153,8 @@ h = N.FLOOR_Y - best
 chk("跳高 190~225px", 190 < h < 225, f"实际 {h:.0f}px")
 chk("跳得上料理台(落差178)", h > 178 + 12, f"余量 {h - 178:.0f}px")
 chk("跳不上吊柜(落差328，须经台面中转)", h < 328 - 40, f"差 {328 - h:.0f}px")
-chk("按住 W 落地后不连跳", abs(l.y - N.FLOOR_Y) < 1.0, f"y={l.y:.1f}")
+chk("按住 W 落地后不连跳（落在地板或餐桌都算落地）",
+    abs(l.y - N.FLOOR_Y) < 1.0 or abs(l.y - TABLE) < 1.0, f"y={l.y:.1f}")
 
 print()
 print("=" * 72)
@@ -149,7 +167,7 @@ l.jump_latch = False
 w.keys = {Qt.Key_W}
 step_pure(1 / 60, 110)
 w.keys = set()
-chk("站在料理台顶面 470", abs(l.y - 470.0) < 1.5, f"y={l.y:.1f}")
+chk("站在料理台顶面（派生）", abs(l.y - COUNTER) < 1.5, f"y={l.y:.1f}")
 chk("落台后不再弹起", l.on_ground and abs(l.vy) < 1.0,
     f"vy={l.vy:.1f} on_ground={l.on_ground}")
 
@@ -157,7 +175,7 @@ print()
 print("=" * 72)
 print("⑥ 爬梯（地板 → 料理台）")
 print("=" * 72)
-l.x, l.y = 700.0, N.FLOOR_Y          # 梯子中心 x=700
+l.x, l.y = float(LADX), FLOOR          # 梯子中心 x=700
 l.vx = l.vy = 0.0
 l.on_ladder = False
 l.jump_latch = False
@@ -167,12 +185,12 @@ on_lad = l.on_ladder
 step_pure(1 / 60, 100)
 w.keys = set()
 chk("进入爬梯状态", on_lad, f"on_ladder={on_lad}")
-chk("爬到台面 470", abs(l.y - 470.0) < 2.0, f"y={l.y:.1f}")
+chk("爬到台面（派生）", abs(l.y - COUNTER) < 2.0, f"y={l.y:.1f}")
 chk("爬完回到地面态", not l.on_ladder, f"on_ladder={l.on_ladder}")
-chk("爬到顶不会自动弹起", abs(l.y - 470.0) < 2.0, f"y={l.y:.1f}")
+chk("爬到顶不会自动弹起", abs(l.y - COUNTER) < 2.0, f"y={l.y:.1f}")
 
 # ⭐ 站在平台上不许抖：连续 60 帧的 y 极差必须 < 1px
-l.x, l.y = 760.0, 470.0
+l.x, l.y = 760.0, COUNTER
 l.vx = l.vy = 0.0
 l.on_ground = True
 l.on_ladder = False
@@ -189,7 +207,7 @@ l.x, l.y = 760.0, 120.0
 l.vx = l.vy = 0.0
 l.on_ground = False
 step_pure(1 / 60, 90)
-chk("高速下落落在料理台而非穿透到地板", abs(l.y - 470.0) < 2.0, f"y={l.y:.1f}")
+chk("高速下落落在料理台而非穿透到地板", abs(l.y - COUNTER) < 2.0, f"y={l.y:.1f}")
 
 print()
 print("=" * 72)
@@ -392,7 +410,7 @@ print("⑬ 爬梯动作（Ronny 2026-10-03 实机反馈：动作没装上）")
 print("=" * 72)
 w.start_night(1)
 l = w.luna
-l.x, l.y = 700.0, N.FLOOR_Y
+l.x, l.y = float(LADX), FLOOR
 l.vx = l.vy = 0.0
 l.on_ladder = False
 l.on_ground = True
@@ -421,7 +439,7 @@ chk("下梯确实在往下走", l.y > 470.0, f"y={l.y:.1f}")
 
 # ⭐ 爬梯时按左右要能蹬开 —— 不做这条她会卡在梯子上（A/D 被爬梯分支吞掉）
 w.keys = set()
-l.x, l.y = 700.0, 520.0
+l.x, l.y = float(LADX), 520.0
 l.vx = l.vy = 0.0
 l.on_ladder = True
 l.on_ground = False
@@ -453,8 +471,8 @@ w.start_night(1)
 l, mw = w.luna, w.mw
 
 # ---- \u566a\u58f0\uff1a\u8ddd\u79bb\u4e0d\u540c\uff0calert \u6da8\u5e45\u5fc5\u987b\u4e0d\u540c ----
-l.x, l.y = 690.0, 470.0
-mw.x, mw.y = 700.0, N.FLOOR_Y          # \u8ddd\u79bb 10px\uff1a\u8d34\u7740\u8033\u6735\u6572
+l.x, l.y = 690.0, COUNTER
+mw.x, mw.y = float(LADX), FLOOR          # \u8ddd\u79bb 10px\uff1a\u8d34\u7740\u8033\u6735\u6572
 mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
 w._try_break()
 near_alert = mw.alert
@@ -465,7 +483,7 @@ chk("\u566a\u58f0\u4f1a\u8bb0\u4f4f\u58f0\u6e90\uff08\u4ed6\u8f6c\u5934\u770b\uf
 
 w.start_night(1)
 l, mw = w.luna, w.mw
-l.x, l.y = 690.0, 470.0
+l.x, l.y = 690.0, COUNTER
 mw.x, mw.y = 1100.0, N.FLOOR_Y         # \u8ddd\u79bb 410px\uff1a\u542c\u5f97\u89c1\u4f46\u5f31\u5f88\u591a
 mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
 w._try_break()
@@ -478,7 +496,7 @@ chk("\u8ddd\u79bb\u8d8a\u8fd1\u566a\u58f0\u8d8a\u5927", far_alert < near_alert,
 # \u8d85\u51fa\u542c\u89c9\u534a\u5f84 = \u5b8c\u5168\u542c\u4e0d\u89c1
 w.start_night(1)
 l, mw = w.luna, w.mw
-l.x, l.y = 690.0, 470.0
+l.x, l.y = 690.0, COUNTER
 mw.x, mw.y = 1245.0, N.FLOOR_Y
 mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
 w._try_break()
@@ -488,8 +506,8 @@ chk("\u8d85\u51fa\u542c\u89c9\u534a\u5f84\u5c31\u5b8c\u5168\u542c\u4e0d\u89c1", 
 # ---- \u7d2f\u79ef\u800c\u4e0d\u662f\u4e00\u6572\u6ee1\uff1a\u6572\u4e09\u4e0b\u624d\u5feb\u8fdb\u8ffd\u8e2a ----
 w.start_night(1)
 l, mw = w.luna, w.mw
-l.x, l.y = 690.0, 470.0
-mw.x, mw.y = 700.0, N.FLOOR_Y
+l.x, l.y = 690.0, COUNTER
+mw.x, mw.y = float(LADX), FLOOR
 mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
 w._break_fx = []
 alerts = []
@@ -546,15 +564,15 @@ w.keys = set()
 # ---- \u722c\u68af\u5b50 = \u5b8c\u5168\u5b89\u5168\uff08Lode Runner \u673a\u5236\uff09 ----
 w.start_night(1)
 l, mw = w.luna, w.mw
-l.x, l.y = 700.0, 520.0                  # \u722c\u68af\u4e2d\u6bb5
+l.x, l.y = float(LADX), 520.0                  # \u722c\u68af\u4e2d\u6bb5
 l.vx = l.vy = 0.0
 l.on_ladder, l.on_ground = True, False
-mw.x, mw.y = 700.0, N.FLOOR_Y
+mw.x, mw.y = float(LADX), FLOOR
 mw.alert, mw.state = 0.30, "chase"       # ⭐ 从 0.3 起步：从满值 1.0 起步永远看不出「缓涨」
 mw.hear_x = None
 a0 = mw.alert
 step_ai(1 / 60, 60)
-chk("梯子上不再绝对安全：他追得上来（Ronny 10-03 上强度）", l.on_ladder and l.y < 530.0,
+chk("梯子上不再绝对安全：他追得上来（Ronny 10-03 上强度）", l.on_ladder and l.y < 520.0,
     f"y={l.y:.0f} on_ladder={l.on_ladder}")
 chk("梯子上警戒缓涨而非归零", mw.alert > a0, f"alert {a0:.2f} -> {mw.alert:.2f}")
 
@@ -570,7 +588,7 @@ chk("\u4e0b\u6765\u540e\u6062\u590d\u88ab\u89c1\u8ff7\u7684\u53ef\u80fd", mw.ale
 # ---- \u753b\u9762\u80fd\u753b\uff08\u5bb9\u5668/\u788e\u7247/\u6f5c\u884c\uff09 ----
 w.start_night(1)
 l, mw = w.luna, w.mw
-l.x, l.y = 690.0, 470.0
+l.x, l.y = 690.0, COUNTER
 l.sneak = True
 w._break_fx = [[690.0, 470.0, 0.4]]
 for st in w.room.stashes:
@@ -613,7 +631,7 @@ chk("\u8df3\u8dc3\u540e\u4f1a\u843d\u56de\u5730\u677f", mw.on_ground and abs(mw.
 chk("\u8df3\u9ad8\u5728\u9884\u671f\u5185", N.FLOOR_Y - top < 90, f"\u5b9e\u9645\u8df3\u9ad8 {N.FLOOR_Y-top:.0f}px")
 
 # \u722c\u68af\uff1a\u9732\u5a1c\u5728\u53f0\u9762\u4e0a \u2192 \u4ed6\u8d70\u5230\u68af\u5b50\u811a\u4e0b\u5e76\u722c\u4e0a\u6765
-l.x, l.y = 700.0, 470.0
+l.x, l.y = float(LADX), float(LADTOP)
 l.on_ground, l.vy = True, 0.0
 mw.x, mw.y = 620.0, N.FLOOR_Y
 mw.state, mw.alert, mw.vy, mw.on_ground = "chase", 1.0, 0.0, True
@@ -666,7 +684,7 @@ chk("\u8df3\u8dc3\u540e\u4f1a\u843d\u56de\u5730\u677f", mw.on_ground and abs(mw.
 chk("\u8df3\u9ad8\u5728\u9884\u671f\u5185", N.FLOOR_Y - top < 90, f"\u5b9e\u9645\u8df3\u9ad8 {N.FLOOR_Y-top:.0f}px")
 
 # \u722c\u68af\uff1a\u9732\u5a1c\u5728\u53f0\u9762\u4e0a \u2192 \u4ed6\u8d70\u5230\u68af\u5b50\u811a\u4e0b\u5e76\u722c\u4e0a\u6765
-l.x, l.y = 700.0, 470.0
+l.x, l.y = float(LADX), float(LADTOP)
 l.on_ground, l.vy = True, 0.0
 mw.x, mw.y = 620.0, N.FLOOR_Y
 mw.state, mw.alert, mw.vy, mw.on_ground = "chase", 1.0, 0.0, True

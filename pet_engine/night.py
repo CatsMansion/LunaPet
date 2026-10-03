@@ -46,32 +46,64 @@ except ImportError:
 
 VW, VH = 1280, 720
 
-FLOOR_Y = 648               # 地板顶面（y 向下）
-NEST_X0, NEST_X1 = 96, 236  # 窝（回这里 = 这趟成功）
+FLOOR_Y = 672               # 地板顶面（y 向下）。⭐ 由 648 下移到 672：
+                            #   按真实比例（1cm=3.3px）2m 吊柜需要 660px，
+                            #   648 会让柜顶出界 12px。地板剩 48px 仍可用。
+NEST_X0, NEST_X1 = 16, 132  # 窝（回这里 = 这趟成功）。宽 116px = 0.35m
 # ⛔⛔ 允许区边界**不在这里** —— 它是逐档的（NIGHTS[i]["border_x"]）。
 #    留一个模块级 BORDER_X 会有个很坑的失败模式：谁改了它，游戏毫无反应，
 #    因为真正生效的是 room.border_x。已删。
 
 # 平台 (x0, y0=顶面, x1, y1=底面)。⛔ 单向平台：只有从上往下落才会踩到
+# ⭐⭐ 2026-10-03 按真实尺寸重排（Ronny：「猫 40cm / 餐桌 1m / 冰箱 1.8m / 柜子 2m」）
+#   换算基准：1cm = 3.3px（露娜 40cm = 132px）
+#   y0 = 顶面 = **角色站上去的 y**（⛔ 不是家具顶，是站位）
 PLATFORMS = [
-    (0,    FLOOR_Y, VW, VH),        # 地板（也是单向，但从下面顶不上来）
-    (520,  470,     880, 500),      # 料理台
-    (980,  320,     1240, 350),     # 吊柜顶
+    (0,    FLOOR_Y, VW, VH),        # 地板
+    (140,  474,     470, 620),     # ⭐ 餐桌：台面 60cm(198px)、宽 1.0m(330px)
+    (480,  375,     1074, 430),    # ⭐ 料理台：台面 90cm(297px)、宽 1.8m(594px)
+    (480,  177,     1074, 240),    # ⭐ 吊柜：站位=柜顶 150cm(495px)；
+                                     #   ⛔ 柜体本身画到 y=12（200cm），但**站位是 177**
+                                     #   —— 按 2m 算站位的话她头顶会出画 120px
 ]
 
+# ⭐ 冰箱（Ronny 2026-10-03：「冰箱我想搞个 QTE 打开然后获取里面的东西」）
+#   贴右墙，占 1140~1240，高 212（顶 436）
+FRIDGE = {"x": 1082, "y": FLOOR_Y, "w": 198, "h": 594}   # ⭐ 180cm 高 × 0.6m 宽
+# ⭐ 冰箱里的东西（比地面容器多）—— 高风险高回报：它就在微波炉巡逻段的东端尽头
+FRIDGE_FOODS = [
+    {"x": 1122, "y": 400, "icon": "watermelon"},
+    {"x": 1236, "y": 400, "icon": "blueberry"},
+    {"x": 1122, "y": 520, "icon": "pumpkin"},
+    {"x": 1236, "y": 520, "icon": "yogurt"},
+]
+
+# ---- QTE 参数（限时按键序列）----
+QTE_TIME_LIMIT = 0.95         # ⭐ 每按一个键的时限（秒）—— 手残也来得及，但不许磨
+QTE_LEN        = 3            # 序列长度
+QTE_FAIL_ALERT = 0.34         # ⛔ 按错/超时的惩罚：微波炉警觉 +0.34（不是直接失败）
+
 # 梯子 (中心x, 顶端y, 底端y)
+# ⭐⭐ 2026-10-03 加了第二根：吊柜(980~1240, y=320) 与台面(520~880) 之间有 100px 空隙，
+#   跳跃上限 211px 但**跨度不够**（要落到 980 起点）→ 吊柜上三个容器原本**根本拿不到**。
+#   ⭐ 这条是 `_自测_可达性.py` 的静态分析抓出来的（模拟玩家版没报，因为模拟玩家更笨）。
+# ⭐⭐ 2026-10-03 Ronny：「梯子之后挪到挂毯和桌布上」
+#   布是柔的、没有厚度的 —— 正好解掉他最早提的「梯子有厚度、姿势不适配」，
+#   而且猫爬布本来就比爬铁杆合理。结构上仍是 LADDERS（位置/端点不变），
+#   只是绘制从「两根细杆+横档」改成「一条垂布」。
 LADDERS = [
-    (700, 470, FLOOR_Y),
+    (620,  375, FLOOR_Y),      # 桌布：从台面（90cm）垂到地面
+    (900,  177, 375),          # 挂毯：从柜顶（150cm）垂到台面
 ]
 
 # 赃物：y 是"它坐在哪个面上"（顶面 y）。icon 复用 packs/luna/ui/ 里的现成图标
 # ⛔ 这份只是【档二·深夜】的基准数据，真正生效的是 NIGHTS[i]["stashes"]
 STASHES = [
-    {"x": 690,  "y": 470, "icon": "salmon"},
-    {"x": 810,  "y": 470, "icon": "yogurt"},
-    {"x": 1080, "y": 320, "icon": "chicken"},
-    {"x": 1180, "y": 320, "icon": "shrimp"},
-    {"x": 960,  "y": FLOOR_Y, "icon": "yolk"},
+    {"x": 700,  "y": 375, "icon": "salmon"},        # 料理台
+    {"x": 900,  "y": 375, "icon": "yogurt"},        # 料理台
+    {"x": 960,  "y": FLOOR_Y, "icon": "yolk"},      # 地板
+    {"x": 700,  "y": 177, "icon": "chicken"},       # 吊柜
+    {"x": 950,  "y": 177, "icon": "shrimp"},        # 吊柜
 ]
 
 # ---- 手感常数（**逐档不变**的那些；都是逻辑像素/秒）----
@@ -132,20 +164,20 @@ GAME_SRC_FACE = {"mw_walk": -1, "run_carry": 1}
 # ============================================================================
 
 _NIGHT1 = [
-    {"x": 760,  "y": 470, "icon": "salmon"},
-    {"x": 840,  "y": 470, "icon": "yogurt"},
-    {"x": 1010, "y": FLOOR_Y, "icon": "yolk"},
-    {"x": 1130, "y": FLOOR_Y, "icon": "blueberry"},
+    {"x": 700,  "y": 375, "icon": "salmon"},        # 料理台
+    {"x": 900,  "y": 177, "icon": "yogurt"},        # 吊柜
+    {"x": 980,  "y": FLOOR_Y, "icon": "yolk"},      # 地板
+    {"x": 250,  "y": 474, "icon": "blueberry"},    # 餐桌
 ]
 _NIGHT2 = list(STASHES)
 _NIGHT3 = [
-    {"x": 690,  "y": 470, "icon": "salmon"},
-    {"x": 810,  "y": 470, "icon": "yogurt"},
-    {"x": 1080, "y": 320, "icon": "chicken"},
-    {"x": 1180, "y": 320, "icon": "shrimp"},
-    {"x": 1040, "y": 320, "icon": "pumpkin"},
-    {"x": 960,  "y": FLOOR_Y, "icon": "yolk"},
-    {"x": 1160, "y": FLOOR_Y, "icon": "watermelon"},
+    {"x": 650,  "y": 375, "icon": "salmon"},        # 料理台
+    {"x": 820,  "y": 375, "icon": "yogurt"},        # 料理台
+    {"x": 620,  "y": 177, "icon": "chicken"},       # 吊柜
+    {"x": 820,  "y": 177, "icon": "shrimp"},        # 吊柜
+    {"x": 1010, "y": 177, "icon": "pumpkin"},       # 吊柜
+    {"x": 960,  "y": FLOOR_Y, "icon": "yolk"},      # 地板
+    {"x": 250,  "y": 474, "icon": "watermelon"},    # 餐桌
 ]
 
 NIGHTS = [
@@ -283,7 +315,10 @@ def _load_icons(pack_root, names):
 # ============================================================================
 
 class Luna:
-    def __init__(self, x, y):
+    def __init__(self, x, y, sneak_ok: bool = False):
+        # ⭐ sneak_ok：潜行专属动作 sneak 是否**真的能播**（派单 37 素材在途）。
+        #   由窗口在构造时算好传进来 —— ⛔ Luna 自己拿不到窗口/包对象，别在它里面查。
+        self.sneak_ok = sneak_ok
         self.x = x
         self.y = y              # ⭐ 脚底中点
         self.vx = 0.0
@@ -301,6 +336,7 @@ class Luna:
         self.moving = False
         self.climb_down = False # 下梯（用于把 climb 帧上下翻转）
         self.sneak = False      # 潜行中
+        self.punch = 0.0        # ⭐ 挥击中（敲容器瞬间播爪的动作），>0 时优先于移动动作
         # ⭐ 跳键闩锁：必须【松开再按】才能再跳。
         #   没有它的话按住 W 会落地即起跳一路连跳（实测踩上台面后立刻弹到 y=379），
         #   爬梯到顶也会自动弹一下 —— 玩家会觉得"我没让它跳"。
@@ -454,14 +490,26 @@ class Luna:
 
     # ---- 表现 ---------------------------------------------------------
     def pick_action(self):
+        # ⭐ 挥击优先（Ronny 10-03 反馈「露娜还是不会攻击」）：
+        #   根因是 pick_action 只看移动状态 —— 她**站着不动**时按 E 根本不切动作。
+        #   ⛔ 而不是"没有挥击素材"（tease 已经装上了）。
+        if self.punch > 0.0:
+            return "tease"
         if self.on_ladder:
             return "climb"
         if not self.on_ground:
             return "jump" if self.vy < -40 else "fall"
         if abs(self.vx) > 34.0:
-            # ⭐ 潜行用 walk（28 帧慢走），正常跑用 human_run。
-            #   ⛔ 别让潜行也播 human_run —— 那个是冲刺动作，播出来等于告诉她"我在全速跑"。
-            return "run_carry" if self.carrying else ("walk" if self.sneak else "human_run")
+            # ⭐ 三分支优先级：拿着东西 > 潜行 > 普通跑
+            #   ⛔ 别让潜行播 human_run（那是冲刺动作，播出来等于告诉她"我在全速跑"）。
+            if self.carrying:
+                return "run_carry"
+            if self.sneak:
+                # ⭐ 潜行优先用 sneak 动作（派单 37 在途）；缺帧时退回 walk。
+                #   ⛔ 别无条件用 "sneak" —— core 会把空帧列表塞进 anim，
+                #     anim.finished 永不触发 → 角色永久卡死。
+                return "sneak" if self.sneak_ok else "walk"
+            return "human_run"
         return "idle"
 
 
@@ -495,8 +543,7 @@ class Microwave:
         self.vy = 0.0
         self.on_ground = True
         self.jump_cd = 0.0         # 跳跃冷却
-        self.on_ladder = False    # ⭐ 他是否正在梯子上（爬梯状态，⛔ 不能靠 y 判断）
-        self.climb_t = 0.0
+        self.on_ladder = False    # ⭐ 他是否正在梯子上（爬梯状态，⛔ 不能靠 y 判断）        self.climb_t = 0.0
         # ⭐ 难度参数全部来自档位配置（不是模块常数）
         self.p0, self.p1 = float(p0), float(p1)
         self.patrol_speed = float(cfg["patrol_speed"])
@@ -659,6 +706,8 @@ class Room:
         self.stashes = [dict(s, taken=False, broken=False) for s in cfg["stashes"]]
         self.border_x = float(cfg["border_x"])     # ⭐ 允许区边界随档位变
         self.mw_patrol = tuple(cfg["patrol"])
+        # ⭐ 冰箱内容（每局重置）：QTE 成功才拿得到
+        self.fridge_left = [dict(f) for f in FRIDGE_FOODS]
 
 
 # ============================================================================
@@ -697,7 +746,7 @@ class NightWindow(QWidget):
         # ---- 状态 ----
         self.night_idx = 1                    # 0/1/2 → NIGHTS
         self.room = Room(NIGHTS[self.night_idx])
-        self.luna = Luna(NEST_X0 + 70, FLOOR_Y)
+        self.luna = Luna(NEST_X0 + 70, FLOOR_Y, sneak_ok=("sneak" in self.pack.actions))
         self.mw = Microwave(NIGHTS[self.night_idx])
         self.keys = set()
         self.phase = "menu"          # menu | play | meowed | hauled | result
@@ -718,11 +767,20 @@ class NightWindow(QWidget):
         self.caught_cnt = 0          # 本档被抓次数
         self.trip_loot = 0           # 本档带回总数
         self.result = None           # 结算面板数据
+        # ⭐ 冰箱 QTE（Ronny 2026-10-03）
+        #   ⭐⭐ 关键设计：**QTE 期间游戏不暂停** —— 微波炉还在逼近，玩家得一边按对键一边盯着他。
+        #      暂停的话这就只是个无意义的按键小游戏，没有压力就没有取舍。
+        self.qte = None              # None | {"seq":[...], "got":int, "t":float, "food":dict}
+        self.qte_flash = 0.0         # 成功/失败的闪白反馈
+        self.fridge_door = 0.0       # ⭐ 冰箱下门开度 0~1（QTE 成功时开一下；纯程序绘制）
+        # ⭐ 场景底图：美术出的静态底图。存在时用它替代程序绘制的墙/地/家具/布。
+        self.has_scene_bg = os.path.isfile(os.path.join(GAME_ASSETS, "scene_bg.png"))
         self._narr_seen = set()      # 本档已用过的旁白，避免连着重复
         self._break_fx = []          # 容器碎裂特效 [[x, y, t], ...]
         self.noise_flash = 0.0       # 噪音闪烁倒计时
         self.mw_t = 0.0              # 微波炉动画计时（步频按速度重映射）
         self._mw_px = self.mw.x      # 上一帧的 x（用来差分算速度，Microwave 没有 vx）
+        self._mw_sm = 0.0            # ⭐ 平滑后的速度（供步频计算，避免抽搐）
         self._was_over = False       # 越界旁白只在她【跨过去那一下】说
         self._was_seen = False       # 被发现的旁白同理，不逐帧刷屏
 
@@ -762,6 +820,9 @@ class NightWindow(QWidget):
                 self.menu_sel = self.night_idx
                 self.phase = "menu"
             return
+        if self.qte and k in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            self._qte_step(k)          # ⭐ QTE 吃掉方向键（移动键在 QTE 期间禁用）
+            return
         if k == Qt.Key_E:
             self._try_break()
         elif k == Qt.Key_R:
@@ -775,7 +836,7 @@ class NightWindow(QWidget):
         cfg = NIGHTS[idx]
         self.night_idx = idx
         self.room = Room(cfg)
-        self.luna = Luna(NEST_X0 + 70, FLOOR_Y)
+        self.luna = Luna(NEST_X0 + 70, FLOOR_Y, sneak_ok=("sneak" in self.pack.actions))
         self.mw = Microwave(cfg)
         self.phase = "play"
         self.phase_t = 0.0
@@ -832,25 +893,101 @@ class NightWindow(QWidget):
         # ⭐ 每次只能拿一件（Ronny 2026-10-03）。两个原因：
         #   ① 把“拿了什么”变成了一个可见状态（头顶一件），而不是一个数字；
         #   ② 手上有东西时跑走要用拿东西的动作（单独一张素材），空手就用 human_run。
-        # ⭐⭐ 在崭边且崭边有待结算的东西 → E = 结算（而不是敲容器）
+        # ⭐⭐ 判定顺序：**先容器，后冰箱**（Ronny 2026-10-03 实机反馈「罐子和冰箱重合点不到」）
+        #   原因：原本冰箱判定在前且范围更宽（x-96 ~ x+w+26），
+        #   而 x=1080 / 1180 两个容器正好落在里面 → 永远走不到容器的敲击分支。
+        #   ⭐ 容器的判定半径（54px）本来就比冰箱紧，"离得近的那个先响应"也更符合直觉。
+        for st in self.room.stashes:
+            if st["broken"] or st.get("scratched"):
+                continue
+            if abs(l.x - st["x"]) < 54.0 and abs(l.y - st["y"]) < 66.0:
+                # ⛔ 手上已有东西 → 拒绝（⛔ 别让它落到下面那两行去，否则会**覆盖** carrying）
+                if l.carrying:
+                    self._say("手上还拿着。回窝放下才能再拿。")
+                    return
+                st["broken"] = True
+                l.carrying = [st["icon"]]                    # ⭐ 只拿一件
+                self._break_fx.append([float(st["x"]), float(st["y"]), 0.0])
+                self._make_noise(float(st["x"]), NOISE_MAX)
+                l.punch = 0.42                                # ⭐ 播"挠"的挥击动作
+                self._narrate("steal")
+                return
+        # ⭐⭐ 冰箱 QTE：在冰箱前按 E → 进入限时按键序列
+        #   ⛔ 放在"手上没东西"判定**之前**，但要求空手 —— 手上拿着东西打不开冰箱。
+        if self._at_fridge() and self.room.fridge_left:
+            if l.carrying:
+                self._say("手上拿着东西，打不开冰箱。")
+            else:
+                self._qte_start()
+            return
+        # ⭐⭐ 在窝边且窝边有待结算的东西 → E = 结算（而不是敲容器）
         if l.x < NEST_X1 + 40 and self.loot_stash:
             self._narrate("settle_now")
             self._settle()
             return
         if l.carrying:
-            self._say("手上还拿着。放下才能再拿。")
+            self._say("手上还拿着。回窝放下才能再拿。")
             return
-        for st in self.room.stashes:
-            if st["broken"]:
-                continue
-            if abs(l.x - st["x"]) < 54.0 and abs(l.y - st["y"]) < 66.0:
-                st["broken"] = True
-                l.carrying = [st["icon"]]   # ⭐ 只拿一件
-                self._break_fx.append([float(st["x"]), float(st["y"]), 0.0])
-                self._make_noise(float(st["x"]), NOISE_MAX)
-                self._narrate("steal")
-                return
+        # ⭐ 容器判定已挪到本函数最前面（先容器后冰箱），这里不再重复一轮
         self._narrate("empty")
+
+    def _at_fridge(self) -> bool:
+        l = self.luna
+        return (l.x > FRIDGE["x"] - 96.0 and l.x < FRIDGE["x"] + FRIDGE["w"] + 26.0
+                and abs(l.y - FRIDGE["y"]) < 6.0)
+
+    def _qte_start(self):
+        """开始一次开冰箱 QTE。⭐ 序列用方向键（玩家全程看屏幕，不用低头看键盘）。"""
+        import random
+        dirs = [Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down]
+        seq = [random.choice(dirs) for _ in range(QTE_LEN)]
+        # 拿一件还没被拿的
+        pool = self.room.fridge_left
+        if not pool:
+            return
+        food = pool[0]
+        self.qte = {"seq": seq, "got": 0, "t": 0.0, "food": food}
+        self.qte_flash = 0.0
+        self._say("撬一下……")
+        self._make_noise(FRIDGE["x"], NOISE_MAX * 0.55)   # 撬门本身有点响（比敲容器轻）
+
+    def _qte_step(self, key):
+        """按一个键。返回 True 表示这次输入被 QTE 吃掉了。"""
+        q = self.qte
+        if not q:
+            return False
+        if key == q["seq"][q["got"]]:
+            q["got"] += 1
+            q["t"] = 0.0
+            if q["got"] >= len(q["seq"]):
+                self._qte_win()
+            else:
+                self._say("咔。")
+        else:
+            self._qte_fail()
+        return True
+
+    def _qte_win(self):
+        f = self.qte["food"]
+        self.room.fridge_left.remove(f)
+        self.luna.carrying = [f["icon"]]
+        self.qte = None
+        self.qte_flash = 0.4
+        # ⭐ 门开一下（纯程序绘制，派单 36 回传裁决：冰箱门开不用素材）
+        self.fridge_door = 1.0
+        self._say("开了。")
+        self._narrate("fridge")
+
+    def _qte_fail(self):
+        self.qte = None
+        self.qte_flash = 0.4
+        # ⛔ 惩罚是"微波炉警觉 + 噪音"，⛔ 不是直接失败/丢命（玩法文档：惩罚要轻）
+        self.mw.alert = min(1.0, self.mw.alert + QTE_FAIL_ALERT)
+        self.mw.hear_x = FRIDGE["x"]
+        if self.mw.alert >= 1.0:
+            self.mw.state = "chase"
+        self._make_noise(FRIDGE["x"], NOISE_MAX * 0.8)
+        self._say("哐——！")
 
     def _make_noise(self, x: float, strength: float):
         """一次声响。⭐ 强度按【与微波炉的距离】线性衰减，超出听觉半径他根本听不见。
@@ -946,6 +1083,8 @@ class NightWindow(QWidget):
         l, mw = self.luna, self.mw
         if self.msg_t > 0:
             self.msg_t -= dt
+        if l.punch > 0.0:
+            l.punch = max(0.0, l.punch - dt)
         if self.noise_flash > 0:
             self.noise_flash = max(0.0, self.noise_flash - dt * 1.6)
         for fx in self._break_fx:
@@ -956,7 +1095,22 @@ class NightWindow(QWidget):
         #   ⛔ Microwave 没有 vx（它直接改 self.x），用位置差分算瞬时速度。
         _mwv = abs(self.mw.x - self._mw_px) / max(dt, 1e-6)
         self._mw_px = self.mw.x
-        self.mw_t += dt * (min(_mwv / 95.0, 3.0) if _mwv > 1.0 else 0.4)
+        # ⭐ 平滑：瞬时速度逐帧抖（转向/加减速都会让它抖），指数移动平滑一下
+        self._mw_sm += (_mwv - self._mw_sm) * min(1.0, dt * 6.0)
+        _sm = self._mw_sm
+        self.mw_t += dt * (min(_sm / 95.0, 2.6) if _sm > 1.0 else 0.4)
+        # ⭐ 冰箱 QTE 计时：⛔ 游戏**不暂停**，微波炉还在追（这才叫 QTE）
+        if self.qte is not None and self.phase == "play":
+            self.qte["t"] += dt
+            if self.qte["t"] > QTE_TIME_LIMIT:
+                self._qte_fail()
+        if self.qte_flash > 0:
+            self.qte_flash = max(0.0, self.qte_flash - dt * 2.0)
+        # ⭐ 冰箱门：开 → 停 0.5s → 关（成功那一下要给玩家看到"门真的开了"）
+        if self.fridge_door > 0.0:
+            self.fridge_door -= dt * 2.2
+            if self.fridge_door < 0.0:
+                self.fridge_door = 0.0
 
         if self.phase == "menu":
             # 菜单：让角色在窝里待机（呼吸），别冻成一张图
@@ -1063,6 +1217,7 @@ class NightWindow(QWidget):
             return
         self._draw_zone(p)
         self._draw_platforms(p)
+        self._draw_fridge(p)
         self._draw_nest(p)
         self._draw_stashes(p)
         self._draw_mw(p)
@@ -1230,18 +1385,22 @@ class NightWindow(QWidget):
 
     # -- 平台与梯子 --
     def _draw_platforms(self, p):
+        # ⭐⭐ 配色取自执行端出的底图（派单 40 v1，`K_底图_v1_无水印.png` 分区中位色）
+        #   墙面 #2D3C4A ｜地板 #181E27 ｜阴影 #161C26 ｜台面 #3C4750
+        #   全图平均色温 R−B = −19（偏冷）—— 冷色夜景 + 台面一处暖光。
+        #   ⭐ 之前是随手调的紫灰（58,52,62 / 74,66,80），偏亮偏紫，和"夜晚厨房"对不上。
         for i, (x0, y0, x1, y1) in enumerate(self.room.platforms):
             if i == 0:      # 地板
-                p.setBrush(QColor(58, 52, 62))
+                p.setBrush(QColor(24, 30, 39))                    # #181E27
                 p.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
-                p.setPen(QPen(QColor(90, 82, 96), 2))
+                p.setPen(QPen(QColor(45, 58, 74), 2))              # 墙脚线偏冷
                 p.drawLine(QPointF(x0, y0 + 1), QPointF(x1, y0 + 1))
                 p.setPen(Qt.NoPen)
                 continue
             # 台面
-            p.setBrush(QColor(74, 66, 80))
+            p.setBrush(QColor(60, 71, 80))                        # #3C4750
             p.drawRoundedRect(QRectF(x0, y0, x1 - x0, y1 - y0), 5, 5)
-            p.setPen(QPen(QColor(120, 112, 126), 3))
+            p.setPen(QPen(QColor(107, 119, 119), 3))              # 台面高光 #6B7777
             p.drawLine(QPointF(x0 + 4, y0 + 1.5), QPointF(x1 - 4, y0 + 1.5))
             p.setPen(Qt.NoPen)
             # 柜体（虚化的下半截）
@@ -1249,15 +1408,50 @@ class NightWindow(QWidget):
             p.drawRect(QRectF(x0 + 10, y1, x1 - x0 - 20, min(120, VH - y1)))
 
         for (xc, ytop, ybot) in self.room.ladders:
-            # ⭐ 梯子重画：44px 宽的实体 → 【两根细杆 + 横档】（Ronny 10-03）
-            #   实体梯子有厚度，挤在露娜身上就看不清她在爬什么。
-            p.setPen(QPen(QColor(150, 140, 160), 4, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(QPointF(xc - 13, ytop), QPointF(xc - 13, ybot))
-            p.drawLine(QPointF(xc + 13, ytop), QPointF(xc + 13, ybot))
-            p.setPen(QPen(QColor(120, 112, 132), 3))
-            for yy in range(int(ytop) + 14, int(ybot), 24):
-                p.drawLine(QPointF(xc - 13, yy), QPointF(xc + 13, yy))
+            # ⭐⭐ 2026-10-03 Ronny：「梯子之后挪到挂毯和桌布上，这样看起来更有意思」
+            #   —— 布是**软的、没有厚度**的，正好解掉他最早提的「梯子有厚度、姿势不适配」。
+            #   ⭐ 而且猫爬布本来就比爬铁杆合理。
+            # ⭐ 布是**静态的** → 底图（assets_game/scene_bg.png）里有美术版时就不画程序版，避免重影。
+            #   ⭐ 冰箱相反：它要开门动画，永远程序画，底图里**不要**画冰箱。
+            if self.has_scene_bg:
+                break
+            _hang = ytop < 300.0                     # 吊柜层那条 = 挂毯
+            w_ = 74.0 if not _hang else 62.0
+            top_y = ytop - (4.0 if not _hang else 2.0)
+            base = QColor(196, 122, 106) if not _hang else QColor(120, 158, 176)
+            dark = QColor(158, 92, 82) if not _hang else QColor(92, 126, 146)
             p.setPen(Qt.NoPen)
+            p.setBrush(dark)
+            # 波浪底边（布的下摆不是直的）
+            p.drawPath(self._cloth_path(xc, top_y, ybot, w_))
+            p.setBrush(base)
+            p.drawPath(self._cloth_path(xc, top_y, ybot, w_ - 7.0))
+            # 竖向褶皱
+            p.setPen(QPen(dark, 1.6))
+            for k in (-1, 0, 1):
+                xx = xc + k * (w_ * 0.26)
+                p.drawLine(QPointF(xx, top_y + 6), QPointF(xx, ybot - 6 - abs(k) * 4))
+            # ⭐ 横向小格纹（布的织纹，远看只是一点质感）
+            p.setPen(QPen(dark, 1.0, Qt.DotLine))
+            yy = top_y + 18
+            while yy < ybot - 8:
+                p.drawLine(QPointF(xc - w_ * 0.4, yy), QPointF(xc + w_ * 0.4, yy))
+                yy += 22
+            p.setPen(Qt.NoPen)
+
+    @staticmethod
+    def _cloth_path(cx, ytop, ybot, half_w):
+        """一条垂下来的布：两侧微收、底边波浪。"""
+        from PySide6.QtGui import QPainterPath
+        pth = QPainterPath()
+        amp = 7.0
+        pth.moveTo(cx - half_w, ytop)
+        pth.lineTo(cx - half_w * 0.92, ybot - amp)
+        pth.quadTo(cx - half_w * 0.5, ybot + amp, cx, ybot - amp * 0.5)
+        pth.quadTo(cx + half_w * 0.5, ybot - amp * 1.6, cx + half_w * 0.92, ybot - amp)
+        pth.lineTo(cx + half_w, ytop)
+        pth.closeSubpath()
+        return pth
 
     def _draw_nest(self, p):
         x0, x1 = NEST_X0, NEST_X1
@@ -1288,6 +1482,99 @@ class NightWindow(QWidget):
             p.drawText(QPointF(x0 - 14, FLOOR_Y - 84), tip)
 
 
+    def _draw_fridge(self, p):
+        """冰箱 + QTE 面板（Ronny 2026-10-03）
+
+        ⛔ v1 画法有 bug：门被画成【深色矩形浮在柜体里】，偏上且配色不同，
+           看起来像"门比柜体大了一圈 / 错位"（Ronny 实机反馈）。
+        ✅ v2 改家用冰箱的读法：**上冷冻 + 下冷藏两扇门**。
+        ✅ v3 加**开门动画**（派单 36 回传裁决）：QTE 成功 → 下门向外转开一条缝。
+           ⭐⭐ 冰箱门开是**纯程序绘制**，不用素材 ——
+              素材里带冰箱会导致「角色与冰箱粘连成同一连通域」（回传实测 489,353px 一整块）、
+              宽高比 0.77 与引擎的 0.47 对不上、白色冰箱配深色夜间场景也对不上。
+              场景道具由引擎画，素材只管角色动作 —— 这是本项目的铁律。
+        """
+        fr = FRIDGE
+        x, y0 = fr["x"], fr["y"] - fr["h"]
+        w, h = fr["w"], fr["h"]
+        p.setPen(QPen(QColor(146, 152, 164), 2))
+        p.setBrush(QColor(206, 211, 220))
+        p.drawRoundedRect(QRectF(x, y0, w, h), 12, 12)          # 柜体
+        up_h = h * 0.36                                          # 上：冷冻室
+        dn_y = y0 + up_h + 5
+        dn_h = y0 + h - 6 - dn_y
+        # ⭐ 下门（冷藏）：QTE 成功时向外转开
+        swing = 26.0 * self.fridge_door                          # 最大开度（度）
+        p.save()
+        p.translate(x + 5, dn_y)                                 # 铰链在左边
+        if swing > 0.5:
+            p.setPen(QPen(QColor(60, 64, 74), 1.4))
+            p.setBrush(QColor(236, 240, 246))
+            # 开门后露出的"里面"（深色 + 一道冷光）
+            p.setBrush(QColor(38, 42, 52))
+            p.drawRect(QRectF(0, 0, w - 10, dn_h))
+            p.setBrush(QColor(150, 210, 235, 90))
+            p.drawRect(QRectF(2, 2, w - 14, dn_h - 4))
+        p.setPen(QPen(QColor(120, 126, 138), 1.6))
+        p.setBrush(QColor(228, 232, 238) if swing <= 0.5 else QColor(240, 244, 248))
+        p.drawRect(QRectF(0, 0, w - 10, dn_h))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(158, 164, 176))
+        p.drawRoundedRect(QRectF(w - 22, dn_h * 0.25, 5, dn_h * 0.5), 3, 3)
+        p.restore()
+        # 上门（冷冻）：固定关着
+        p.setPen(QPen(QColor(120, 126, 138), 1.6))
+        p.setBrush(QColor(228, 232, 238))
+        p.drawRect(QRectF(x + 5, y0 + 5, w - 10, up_h - 3))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(158, 164, 176))
+        p.drawRoundedRect(QRectF(x + w - 15, y0 + 14, 5, up_h * 0.45), 3, 3)
+        p.setBrush(QColor(120, 128, 142))                       # 底部踢脚
+        p.drawRect(QRectF(x + 4, y0 + h - 6, w - 8, 6))
+        # 里面还剩几件（小横条，开门时才看得见）
+        if self.fridge_door > 0.05:
+            for f in self.room.fridge_left:
+                p.setBrush(QColor(255, 230, 170, int(190 * self.fridge_door)))
+                p.drawRect(QRectF(x + 12, dn_y + 10 + (f["y"] - 520) * 0.30, w - 30, 4))
+        near = self._at_fridge()
+        if self.room.fridge_left and not self.qte:
+            p.setPen(QColor(255, 226, 150) if near else QColor(140, 132, 116))
+            p.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
+            p.drawText(QPointF(x - 10, y0 - 10), "按 E 撬开" if near else "冰箱")
+        if self.qte:
+            self._draw_qte(p)
+
+    def _draw_qte(self, p):
+        q = self.qte
+        bw, bh, gap = 68.0, 68.0, 16.0
+        n = len(q["seq"])
+        total = n * bw + (n - 1) * gap
+        x0 = VW * 0.5 - total / 2
+        cy = 300.0
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(16, 16, 22, 218))
+        p.drawRoundedRect(QRectF(x0 - 24, cy - bh / 2 - 30, total + 48, bh + 62), 14, 14)
+        names = {Qt.Key_Left: "\u2190", Qt.Key_Right: "\u2192",
+                 Qt.Key_Up: "\u2191", Qt.Key_Down: "\u2193"}
+        for i, kd in enumerate(q["seq"]):
+            x = x0 + i * (bw + gap)
+            done = i < q["got"]
+            p.setBrush(QColor(90, 200, 140) if done else QColor(52, 54, 66))
+            p.setPen(QPen(QColor(214, 178, 118), 2))
+            p.drawRoundedRect(QRectF(x, cy - bh / 2, bw, bh), 10, 10)
+            p.setPen(QColor(20, 20, 26) if done else QColor(240, 232, 210))
+            p.setFont(QFont("Consolas", 30, QFont.Bold))
+            p.drawText(QRectF(x, cy - bh / 2 + 10, bw, bh), Qt.AlignCenter, names.get(kd, "?"))
+        left = max(0.0, 1.0 - q["t"] / QTE_TIME_LIMIT)
+        p.setBrush(QColor(40, 42, 52))
+        p.drawRoundedRect(QRectF(x0 - 12, cy + bh / 2 + 12, total + 24, 10), 5, 5)
+        p.setBrush(QColor(255, 190, 90) if left > 0.35 else QColor(255, 110, 80))
+        p.drawRoundedRect(QRectF(x0 - 12, cy + bh / 2 + 12, (total + 24) * left, 10), 5, 5)
+        p.setPen(QColor(240, 226, 196))
+        p.setFont(QFont("Microsoft YaHei", 12))
+        p.drawText(QRectF(x0 - 12, cy - bh / 2 - 24, total + 24, 20), Qt.AlignCenter,
+                   "\u6309\u5e8f\u53eb\u65b9\u5411\u952e\uff08\u4ed6\u8fd8\u5728\u8ffd\uff09")
+
     def _draw_stashes(self, p):
         """容器：⛔ 完好时**不画食物**（只透过玻璃看到一点轮廓），
         敲碎那一帧才把食物真正露出来 —— 「看得见拿不到」是这机制的视觉核心。"""
@@ -1302,8 +1589,18 @@ class NightWindow(QWidget):
                 for dx, dy, r in ((-13, -3, 4), (9, -2, 3), (0, 3, 3.5), (16, 4, 2.5)):
                     p.drawEllipse(QPointF(cx + dx, cy + dy), r, r)
                 continue
+            if st.get("scratched"):
+                # ⭐ 方案⑥（2026-10-03）：挠过但没碎 → 留三道爪痕
+                #   （单 A 的 v1 视频动作幅度小，用这个补足"她在挠"的观感，零素材成本）
+                p.setPen(QPen(QColor(236, 240, 246, 190), 2.2, Qt.SolidLine, Qt.RoundCap))
+                for k in range(3):
+                    sx = cx - 12 + k * 9
+                    p.drawArc(QRectF(sx - 7, st["y"] - 34, 15, 26), 250 * 16, 110 * 16)
 
-            bob = math.sin(self.mw.climb_t * 2 + cx) * 1.6
+            # ⛔ 这里原来写的是 self.mw.climb_t —— 那是 Luna 的字段，Microwave 上没有
+            #   （之前一直没炸是因为这个分支只在有完好容器时才走到，而旧测试恰好没渲染到）。
+            #   ⭐ 统一用 self.mw_t（微波炉动画计时，全局都有）。
+            bob = math.sin(self.mw_t * 2.0 + cx) * 1.6
             body = QRectF(cx - 17, cy - 40 + bob, 34, 40)
             # ① 微光（提示这里有东西、可以敲）
             gg = QRadialGradient(body.center(), 2, body.center(), 40)
@@ -1326,6 +1623,17 @@ class NightWindow(QWidget):
                 p.drawImage(QRectF(cx - 18, cy - 27 + bob, 36, 36), ic,
                             QRectF(0, int(ic.height() * 0.18),
                             ic.width(), int(ic.height() * 0.82)))
+                # ⭐ 方案⑥（2026-10-03）：挠过但没碎的罐子留三道爪痕 ——
+                #   单 A 的 v1 视频动作幅度小（头部 y 极差仅 17px），用这个补足"她在挠"的观感，
+                #   ⭐ 零素材成本。等单 A v3 出来了这段自然就不画了。
+                if st.get("scratched"):
+                    p.setPen(QPen(QColor(236, 240, 246, 200), 2.2,
+                                  Qt.SolidLine, Qt.RoundCap))
+                    for k in range(3):
+                        sx = cx - 12 + k * 9
+                        p.drawArc(QRectF(sx - 7, st["y"] - 30 + bob, 15, 24),
+                                  250 * 16, 110 * 16)
+                    p.setPen(Qt.NoPen)
                 p.setBrush(QColor(220, 180, 120))
                 p.drawEllipse(QPointF(cx, cy - 12), 12, 8)
             # ⑤ 玻璃高光
@@ -1504,10 +1812,17 @@ def start(pack_dir: str):
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
     here = os.path.dirname(os.path.abspath(__file__))
-    pack_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    # ⛔ 别把 `--play` 当成角色包路径 —— 过滤掉所有 -- 开头的参数
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    pack_dir = args[0] if args else os.path.join(
         os.path.dirname(here), "packs", "luna")
     w = start(pack_dir)
-    print("[夜间] 已启动：深夜厨房灰盒")
+    # ⭐ `--play` = 跳过主菜单直接进游戏（省掉"还要按一下确认键"这一步）
+    if "--play" in sys.argv:
+        w.start_night(0)
+        print("[夜间] 已启动：直接进档（--play）")
+    else:
+        print("[夜间] 已启动：主菜单（按 Space/回车 开始）")
     sys.exit(app.exec())
 
 

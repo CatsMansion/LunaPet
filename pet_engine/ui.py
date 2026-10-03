@@ -542,6 +542,18 @@ class PetWindow(QWidget):
             g.drawEllipse(26, 2, 14, 14)
             g.setBrush(_B(QColor(200, 160, 90)))
             g.drawEllipse(24, 10, 10, 10)
+        elif name == "sneak":
+            # 潜行光标：两道静音波纹 + 一串渐淡的猫脚印
+            g.setPen(_Pen(QColor(170, 186, 214, 130), 2))
+            g.drawArc(6, 6, 28, 28, 200 * 16, 140 * 16)
+            g.drawArc(12, 12, 16, 16, 200 * 16, 140 * 16)
+            g.setPen(Qt.NoPen)
+            g.setBrush(_B(QColor(206, 216, 236, 190)))
+            g.drawEllipse(20, 30, 7, 5)
+            g.setBrush(_B(QColor(196, 208, 232, 120)))
+            g.drawEllipse(27, 25, 6, 4)
+            g.setBrush(_B(QColor(186, 200, 228, 70)))
+            g.drawEllipse(33, 21, 5, 4)
         elif name == "pillow":
             # 兜底：素材缺失时才走。✅ 正常路径已用真素材（派单 34 装机后）。
             # ⛔ ⛔ 别再拿 packs/luna/ui/pillow.png 当"错素材"的例子了 ——
@@ -597,6 +609,23 @@ class PetWindow(QWidget):
             self.pet.goal = "seek"
             self.pet._cursor_x = float(QCursor.pos().x())
             return False          # ⭐ 不吃掉点击 → 她还会照常被摸摸
+        if self._held_tool == "sneak":
+            # ⭐ 潜行（Ronny 2026-10-03：「静步要有自己的动画，也可以在桌宠模式下自己播放」）
+            #   点一下 = 她自己蹑手蹑脚**走一段**（不是原地播完）。
+            #   ⭐ 素材在途：用 _has_frames 判真实可播性，缺帧就退回 walk ——
+            #     ⛔ 千万别无条件 play("sneak")，那会把 anim 设成空列表 → anim.finished
+            #     永不触发 → 角色永久卡死（这是 _has_frames 存在的理由）。
+            pet = self.pet
+            if not getattr(pet, "asleep", False):
+                pet.play("sneak" if self._has_frames("sneak") else "walk")
+                pet.state_timer = 3.2
+                # ⭐ 给她一个小目标，她才会真的挪步
+                pet.goal = "seek"
+                try:
+                    pet._cursor_x = float(QCursor.pos().x())
+                except Exception:
+                    pass
+            return True
         if self._held_tool == "brush":
             # ⭐⭐ 2026-10-02 梳毛（派单 31 的 2/3）：点一下 = 梳一次（播 brush 动作）
             #   素材：她**闭眼笑 + 头往梳子方向顶**，梳子从画外伸入（14 帧，once）。
