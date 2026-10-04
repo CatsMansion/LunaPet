@@ -49,7 +49,9 @@ def how_to_reach(x, y, ladder_x, ladder_top):
         if py >= N.FLOOR_Y - 1:
             return "地板"                    # 就在地板层
         # ⭐ 梯子：只要**有一根梯子的顶端 == 这一层的 y** 就行（⛔ 不要求梯子在容器正上方）
-        for (lx, ltop, lbot) in N.LADDERS:
+        #   ⭐ 2026-10-03 追加攀爬面（LADDER_ZONES，桌布整面）—— 取中心 x 参与同一判据
+        _lad_all = list(N.LADDERS) + [((z[0] + z[1]) / 2.0, z[2], z[3]) for z in N.LADDER_ZONES]
+        for (lx, ltop, lbot) in _lad_all:
             if abs(ltop - py) <= 2.0:
                 return "爬梯子 x=%d → 站 y=%d，沿台面走到 x=%d" % (lx, py, x)
         # ⛔ 解包顺序必须是 (y, x0, x1) —— 我曾经写成 (qx, qy0, qx1)，
@@ -78,10 +80,11 @@ for cfg in N.NIGHTS:
         risk = "⚠ 要越界 %.0fpx" % max(0, s["x"] - cfg["border_x"]) if s["x"] > cfg["border_x"] else "区内"
         chk("  %-10s x=%-5d y=%-4d" % (s["icon"], s["x"], s["y"]),
             how is not None, "%s  %s" % (how or "⛔ 够不到", risk))
-    # 冰箱
-    fx = N.FRIDGE["x"] - 70.0
-    fr = how_to_reach(fx, N.FLOOR_Y, ladder_x, ladder_top)
-    chk("  冰箱      x=%-5d y=%-4d" % (fx, N.FLOOR_Y), fr is not None,
+    # 冰箱 —— ⭐ 2026-10-03 改口径：QTE 站位 = **桌面上**（背景板里冰箱下半被桌布挡住，
+    #   看得见的部分全在桌面以上；地板那侧现在是实心布墙，根本站不进去）
+    fx = N.FRIDGE["x"] + 40.0        # 冰箱段在桌面右半（570~730），取 610
+    fr = how_to_reach(fx, N.TABLE_TOP, ladder_x, ladder_top)
+    chk("  冰箱      x=%-5d y=%-4d" % (fx, N.TABLE_TOP), fr is not None,
         "%s  %s" % (fr or "⛔ 够不到",
                      "⚠ 要越界 %.0fpx" % (fx - cfg["border_x"]) if fx > cfg["border_x"] else "区内"))
 

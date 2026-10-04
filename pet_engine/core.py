@@ -398,6 +398,7 @@ class Pet:
         self._sil_in = None          # ⭐ 轮廓原始入参（4 元组或 callable），见 _sil_now()
         self.jumping: bool = False                              # ⭐ 引擎驱动的抛物线跳进行中
         self.excited: bool = False                              # ⭐ 兴奋模式（激光等）→ 移动用 run
+        self.sneak_t: float = 0.0                               # ⭐ 潜行剩余秒数（>0 → 移动素材用 sneak）
         self.state = "idle"
         self.facing_right = True
         self.state_timer = random.uniform(*self.behaviour.idle_duration)
@@ -897,12 +898,28 @@ class Pet:
         ⭐ Ronny 2026-10-01：「新增**兴奋模式**，在激光模式下**不再 walk 改为 run**」
         ⭐ 同日更正：「（四足版）有点像**猩猩**，先不要启用，把这个动作记为**猩猩跑**」
            → 等真正的**人类跑**（`human_run`）到位再启用。
+        ⭐⭐ 2026-10-04 加 `sneak`（潜行）：优先级**低于**兴奋态 ——
+           激光笔模式下她是冲刺状态，不该同时蹑手蹑脚。
         ⛔ 状态名仍然是 `walk`（状态机只认 walk）—— 变的只是**播哪个素材**，
            这样 turn_in / turn_out 的接力、走路计时、速度缓动全都不用动。
         """
         if getattr(self, "excited", False) and "human_run" in self.pack.actions:
             return "human_run"
+        if getattr(self, "sneak_t", 0.0) > 0.0 and "sneak" in self.pack.actions:
+            return "sneak"
         return "walk"
+
+    def set_sneaking(self, seconds: float):
+        """⭐ 潜行开关（Ronny 2026-10-03：「静步要有自己的动画，也可以在桌宠模式下自己播放」）
+
+        点一下 = 她**蹑手蹑脚走一段**，到时自动恢复普通走。
+        ⛔ 别直接 play("sneak")：core 里「有目标时状态不是 walk 就 play_walk()」，
+           play 出来的 sneak 会在下一帧被 walk 顶掉（实测 = 点了没反应）。
+        ✅ 走 _loco_act() 这条通道：素材换成 sneak，状态名仍是 walk，速度/计时全不动。
+        """
+        self.sneak_t = max(0.0, float(seconds))
+        if not self.asleep:
+            self.play_walk()
 
     def play_walk(self):
         """播当前的移动素材（walk 或 run），但**状态名固定回 `walk`**"""
@@ -922,6 +939,14 @@ class Pet:
         if self.dragging:
             self._update_drag_tilt()
             return
+
+        # ⭐ 潜行倒计时（Ronny：静步是"蹑手蹑脚走一段"，不是永久状态）
+        #   到点只把**素材**换回 walk（状态名本来就是 walk，不动状态机）。
+        #   ⛔ 别在这里 play("idle") —— 她可能正走到一半。
+        if self.sneak_t > 0.0:
+            self.sneak_t = max(0.0, self.sneak_t - dt)
+            if self.sneak_t <= 0.0 and self.anim and self.anim.act.name == "sneak":
+                self.play_walk()
 
         # 重力
         if not self.body.on_ground:
@@ -980,7 +1005,9 @@ class Pet:
         # 走路位移：⭐ 由 stride_px 推出的每帧位移 × 该帧播放速度
         if self.state == "walk" and self.anim:
             # ⭐⭐ 2026-10-01：速度按**实际在播的素材**算（兴奋态播的是 human_run）
-            _lname = self.anim.act.name if self.anim.act.name in ("walk", "human_run") else "walk"
+            #   ⭐ 2026-10-04：加 sneak —— ⛔ 不写进来的话潜行会用 walk 的步幅走，
+            #     表现就是"动作是蹑手蹑脚，速度却跟散步一样快"（等于没实装）。
+            _lname = self.anim.act.name if self.anim.act.name in ("walk", "human_run", "sneak") else "walk"
             act = self.pack.actions[_lname]
             if _lname == "human_run":
                 # ⭐ Ronny：「run 的移速为 **walk 的 5 倍**」

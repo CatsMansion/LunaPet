@@ -615,11 +615,14 @@ class PetWindow(QWidget):
             #   ⭐ 素材在途：用 _has_frames 判真实可播性，缺帧就退回 walk ——
             #     ⛔ 千万别无条件 play("sneak")，那会把 anim 设成空列表 → anim.finished
             #     永不触发 → 角色永久卡死（这是 _has_frames 存在的理由）。
+            # ⭐⛔ 2026-10-04 修「点了没反应」：原来这里直接 `play("sneak")`，
+            #   但 core 里有目标时会 `if self.state != "walk": play_walk()` ——
+            #   play 出来的 sneak（state="sneak"）下一帧就被 walk 顶掉，等于白点。
+            #   ✅ 走 pet.set_sneaking()：素材换 sneak、状态名仍是 walk、到点自动换回。
             pet = self.pet
             if not getattr(pet, "asleep", False):
-                pet.play("sneak" if self._has_frames("sneak") else "walk")
-                pet.state_timer = 3.2
-                # ⭐ 给她一个小目标，她才会真的挪步
+                pet.set_sneaking(3.2)
+                # ⭐ 给她一个小目标，她才会真的挪步（潜行速度由 pet.json 的 stride_px 决定）
                 pet.goal = "seek"
                 try:
                     pet._cursor_x = float(QCursor.pos().x())

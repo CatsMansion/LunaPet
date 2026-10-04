@@ -514,6 +514,20 @@ class ToolBar(QWidget):
             p.setPen(QPen(QColor(255, 255, 255, 120), 1.8, Qt.SolidLine, Qt.RoundCap))
             p.drawLine(cx - 13, cy - 8, cx - 4, cy - 9)
             return
+        elif key == "sneak":
+            # 潜行：两道"静音"波纹（左上）+ 一串渐淡的猫脚印（斜向右下）
+            #   ⭐ 与 ui.py `_make_tool_cursor` 里的潜行光标是**同一套图形语言**
+            #   （波纹开口方向 / 脚印渐隐都一致）—— 槽位图标和光标长得不一样会被当成两个东西
+            #   ⛔ 不画投影底 —— 40px 里一块灰底会把波纹和脚印全吃掉（实测像一团污渍）
+            from PySide6.QtCore import QPointF
+            p.setPen(QPen(QColor(150, 165, 200), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawArc(cx - 18, cy - 20, 20, 20, 200 * 16, 140 * 16)   # 外波纹
+            p.drawArc(cx - 11, cy - 13, 6, 6, 200 * 16, 140 * 16)     # 内波纹
+            p.setPen(Qt.NoPen)
+            for dx, dy, a in [(-4, 8, 235), (4, 0, 150), (12, -8, 80)]:
+                p.setBrush(QBrush(QColor(140, 158, 198, a)))          # 越走越轻
+                p.drawEllipse(QPointF(cx + dx - 2, cy + dy - 2), 3.8, 2.8)
         elif key == "bowl":
             # 饭碗：敞口碗 + 碗口食团 + 碗足 + 高光
             # ⛔ QLinearGradient 已在模块级导入，这里⛔⛔ 不要重复 `from ... import` ——
