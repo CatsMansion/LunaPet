@@ -183,6 +183,8 @@ a = Analysis(
     hiddenimports=[
         "ui", "core",
         "ui_toolbar",          # 工具箱
+        "gamehub",             # ⭐ 游戏主界面（2026-10-05，函数内延迟 import）
+        "hundred",             # ⭐ 小游戏「是男人就下一百层」（同上）
         "night",               # ⭐ 小游戏（函数内延迟 import）
         "pet_engine.console", "console",
     ],

@@ -133,32 +133,31 @@ class ToolBar(QWidget):
         """
         if key != "gamepad":
             return
-        # ⭐ 双通道 import，且**优先复用已加载的模块**：
-        #   run.py 和打包后的 exe 都把 pet_engine 当作顶层模块目录（`from night import`
-        #   才是那条一直成立的路），`.night` 只在测试脚本用 `from pet_engine import …` 时才成立。
-        #   → 顺序是 night → .night。反过来写的话，exe 每次都要先撞一次 ImportError。
-        #   ⛔ 无论哪条路，night 都必须写进 spec 的 hiddenimports —— 它是函数内 import，
-        #      静态分析不保证扫到（工具箱 ui_toolbar 当初也没在清单里，属于运气好）。
+        # ⭐⭐ 2026-10-05：入口改成**游戏主界面**（GameHubWindow）。
+        #   之前这里直接开 night（深夜厨房），桌宠玩家没有"选"的余地，
+        #   而且加第二个游戏时没地方放。
+        #   ⛔ 主界面自己负责延迟 import hundred / night —— 它比工具箱更需要，
+        #     因为它要 import **两个**游戏模块，任一失败都不能影响另一个。
         import sys as _sys
-        NightWindow = None
-        for _name in ("night", "pet_engine.night"):
+        GameHubWindow = None
+        for _name in ("gamehub", "pet_engine.gamehub"):
             _m = _sys.modules.get(_name)
-            if _m is not None and hasattr(_m, "NightWindow"):
-                NightWindow = _m.NightWindow
+            if _m is not None and hasattr(_m, "GameHubWindow"):
+                GameHubWindow = _m.GameHubWindow
                 break
-        if NightWindow is None:
+        if GameHubWindow is None:
             try:
-                from night import NightWindow         # type: ignore
+                from gamehub import GameHubWindow       # type: ignore
             except ImportError:
                 try:
-                    from .night import NightWindow    # type: ignore
+                    from .gamehub import GameHubWindow   # type: ignore
                 except Exception as e:
-                    print(f"[夜间] 模块加载失败：{type(e).__name__}: {e}")
+                    print(f"[游戏] 模块加载失败：{type(e).__name__}: {e}")
                     return
-        if NightWindow is None:
+        if GameHubWindow is None:
             return
 
-        w = getattr(self, "_night", None)
+        w = getattr(self, "_hub", None)
         if w is not None:
             try:
                 w.show()
@@ -169,21 +168,35 @@ class ToolBar(QWidget):
                 w = None                     # 已被 C++ 析构 → 重建
 
         try:
-            self._night = NightWindow(self.pet.pack)
+            self._hub = GameHubWindow(self.pet.pack)
         except Exception as e:
-            print(f"[夜间] 打不开：{type(e).__name__}: {e}")
+            print(f"[游戏] 打不开：{type(e).__name__}: {e}")
             return
-        # ⭐ 关掉即销毁，好让 destroyed 信号把工具栏放回来
-        self._night.setAttribute(Qt.WA_DeleteOnClose, True)
-        self._night.destroyed.connect(self._on_night_closed)
-        self._night.show()
+        # ⭐ 关掉即销毁。⛔ **不要**在 closeEvent 里再关子游戏 ——
+        #   GameHubWindow 自己的 closeEvent 已经负责关子游戏了，
+        #   工具箱这层再关一次会对已析构的 C++ 对象抛 RuntimeError。
+        self._hub.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._hub.destroyed.connect(self._on_hub_closed)
+        self._hub.show()
         # ⭐ 抽屉是 WindowStaysOnTopHint，会一直压在游戏窗口上面挡住画面。
         #   进游戏期间先藏起来，退出游戏再放回来。
         self._drop_held_tool()
         self.hide()
-        print("[夜间] 已进入：深夜厨房")
+        print("[游戏] 已打开主界面")
+
+    def _on_hub_closed(self, *_):
+        self._hub = None
+        try:
+            self.show()
+            self._home = self.pos()          # 期间可能没动，保险同步一次
+        except Exception:
+            pass
+        print("[游戏] 已退出")
 
     def _on_night_closed(self, *_):
+        # ⭐ 2026-10-05：主界面接管后，night 自己关掉**不会**走到这里
+        #   （GameHubWindow 关子游戏走的是自己的 _close_child + destroyed）。
+        #   这个槽位保留只为兼容 —— 万一还有别的路径直接开 night。
         self._night = None
         try:
             self.show()
@@ -569,11 +582,16 @@ class ToolBar(QWidget):
     # ---------- 托盘/退出时清掉 ----------
     def closeEvent(self, ev):
         # ⭐ 2026-10-03：工具栏没了（= 退出桌宠）时，游戏窗口不该继续飘在那儿
-        w = getattr(self, "_night", None)
-        if w is not None:
+        #   ⭐ 2026-10-05：主界面接管后要关的是 _hub，⛔ 不是只关 _night。
+        #   只关 _night 的后果：玩家开了主界面没进游戏就退桌宠，
+        #   主界面留在屏幕上，桌宠已经没了 —— 看起来像程序卡住。
+        for _attr in ("_hub", "_night"):
+            w = getattr(self, _attr, None)
+            if w is None:
+                continue
             try:
                 w.close()
             except RuntimeError:
                 pass
-            self._night = None
+            setattr(self, _attr, None)
         ev.accept()

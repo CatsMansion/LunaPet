@@ -15,8 +15,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from pet_engine import night as N
 
-# 实测值（来自 _自测_夜间.py 的跳跃断言 190~225）
-JUMP_MAX = 211
+# ⭐⭐ 2026-10-04 实测值（_d_新布局几何.py，真实 Luna.update 跑出来）：
+#   跳跃上限 = **204px**，⛔ 不是解析值 211。
+#   ⛔ 解析值 JUMP_V²/(2g) = 211.6 会**高估 7~8px** —— 离散积分每帧先加重力再位移，
+#     峰值出现在帧边界上而不是解析顶点，所以实测必然略小。
+#   ⚠️ 后果：拿 211 当判据，会把「差 5px 够不到」的平台**误判成够得到**。
+#     这不是保守估计，是**乐观估计**，方向正好是最坏的那一侧。
+JUMP_MAX = 204
 REACH_DY = 66.0        # 敲容器的 y 判定半径
 REACH_DX = 54.0        # 敲容器的 x 判定半径
 
@@ -33,34 +38,69 @@ def chk(name, cond, info=""):
 def how_to_reach(x, y, ladder_x, ladder_top):
     """她怎么才能站到能敲到这个容器的位置。返回可读路径或 None。
 
-    ⭐ 关键：**梯子不需要在容器正上方** —— 爬上台面后可以沿台面横向走过去。
+    ⭐ 关键：**梯子/起跳点不需要在容器正上方** —— 爬上台面后可以沿台面横向走过去。
       （我第一版把"梯子必须在容器 ±30px 内"当必要条件，误报了 9 件"够不到"。）
-    ⭐ 所以正确判据是两条：
-      ① 能不能**站上**覆盖容器 x 的某一层平台 P（|P.y - 容器y| ≤ 判定半径）；
-      ② 从地面（或更低的平台）能不能到 P —— 靠梯子（顶端 == P.y）或跳（落差 ≤ 211）。
+
+    ⭐⭐ 2026-10-04 修判据的**结构性缺陷**（背景板 v4 重排后暴露）：
+      旧版只在「**覆盖容器 x** 的平台」列表 cand 里找起跳点，
+      于是「起跳台不覆盖容器 x」的情况一律判够不到。
+      实测反例：茶几(430~700) 不覆盖 x=820，但**从茶几顶起跳正好落到厨房台 380**，
+      旧判据把台面上 4 件容器全报成 FAIL（实测 `_d_新布局几何.py` + 真机 Luna.update
+      跑出来是通的 —— 落点 x=898 y=380）。
+      ✅ 正确做法：**跳跃判据要在「全场平台」里找起跳点**，只要
+         「起跳台顶 y 与目标层 y 的落差 ≤ JUMP_MAX」**且两者 x 区间有交集或够得着跨度**。
+         只有「站上去」这一步才要求覆盖容器 x。
     """
-    # 覆盖容器 x 的表面，**地板也要算**（⛔ 第一版漏了地板 → 地板上的容器全被判"够不到"）
-    cand = [(N.FLOOR_Y, 0, 1280)] + [(py0, px0, px1) for (px0, py0, px1) in plats if px0 <= x <= px1]
-    cand.sort(key=lambda t: t[0])          # y 小 = 位置高（先试高层，再退回地面）
-    for (py, px0, px1) in cand:
+    # ① 站位候选：**必须覆盖容器 x** 的那一层（站上去才能敲）
+    stand = [(N.FLOOR_Y, 0, 1280)] + [(py0, px0, px1) for (px0, py0, px1) in plats
+                                       if px0 <= x <= px1]
+    stand.sort(key=lambda t: t[0])          # y 小 = 位置高（先试高层）
+    for (py, px0, px1) in stand:
         if abs(py - y) > REACH_DY:
             continue                        # 这一层站上去也够不到（高度不对）
-        # ② 从地面能不能到这一层
-        if py >= N.FLOOR_Y - 1:
-            return "地板"                    # 就在地板层
-        # ⭐ 梯子：只要**有一根梯子的顶端 == 这一层的 y** 就行（⛔ 不要求梯子在容器正上方）
-        #   ⭐ 2026-10-03 追加攀爬面（LADDER_ZONES，桌布整面）—— 取中心 x 参与同一判据
-        _lad_all = list(N.LADDERS) + [((z[0] + z[1]) / 2.0, z[2], z[3]) for z in N.LADDER_ZONES]
-        for (lx, ltop, lbot) in _lad_all:
-            if abs(ltop - py) <= 2.0:
-                return "爬梯子 x=%d → 站 y=%d，沿台面走到 x=%d" % (lx, py, x)
-        # ⛔ 解包顺序必须是 (y, x0, x1) —— 我曾经写成 (qx, qy0, qx1)，
-        #    结果 `qy0 > py` 变成在比 **x0 和 y**，跳跃判定整个是错的
-        #    （先误报"全部可达"，改布局后又误报"够不到"）。
-        for (qy0, qx0, qx1) in cand:
-            if qy0 > py and (qy0 - py) <= JUMP_MAX:
-                return "从 y=%d 跳 %dpx → 站 y=%d" % (qy0, qy0 - py, py)
+        how = _can_get_there(py, px0, px1)
+        if how:
+            return "%s → 沿台面走到 x=%d" % (how, x)
     return None
+
+
+def _can_get_there(py, tx0, tx1):
+    """能不能站到 y=py 这一层（该层 x 区间 = [tx0,tx1]）。返回路径描述或 None。
+    ⭐ 起跳点在**全场平台**里找（不要求覆盖目标 x）—— 见 how_to_reach 注释。
+    ⭐⭐ 目标区间必须**显式传进来**：第一版我图省事写成模块级 px0_lo/px1_hi 全局，
+       结果跨度判定永远拿 0~1280 去比 —— 等于没有跨度约束，会判出
+       "从地板横跨 1280px 跳上台子"的假可达。全局变量在测试脚本里也一样是地雷。
+    """
+    if py >= N.FLOOR_Y - 1:
+        return "地板"                         # 就在地板层
+    # 梯子 / 攀爬面：只要有一根的顶端 == 这一层的 y
+    _lad_all = list(N.LADDERS) + [((z[0] + z[1]) / 2.0, z[2], z[3]) for z in N.LADDER_ZONES]
+    for (lx, ltop, lbot) in _lad_all:
+        if abs(ltop - py) <= 2.0:
+            return "爬梯子 x=%d → 站 y=%d" % (lx, py)
+    # ⭐ 跳跃：**全场**平台做起跳点（解包顺序 = (y, x0, x1)，
+    #   ⛔ 曾经写成 (qx, qy0, qx1) 结果在拿 x0 比 y，跳跃判定整个是错的）。
+    _all = [(N.FLOOR_Y, 0, 1280)] + [(py0, px0, px1) for (px0, py0, px1) in plats]
+    for (qy, qx0, qx1) in _all:
+        if qy <= py + 1:
+            continue                        # 起跳层不比目标层高
+        if (qy - py) > JUMP_MAX:
+            continue
+        # 跨度：起跳区间与**目标层区间**的最近距离 ≤ JUMP_SPAN
+        gap = 0.0
+        if qx1 < tx0:
+            gap = tx0 - qx1
+        elif tx1 < qx0:
+            gap = qx0 - tx1
+        if gap <= JUMP_SPAN:
+            return "从 y=%d 跳（落差 %dpx / 跨度 %dpx）→ 站 y=%d" % (qy, qy - py, gap, py)
+    return None
+
+
+# 跳跃跨度：悬空时间 × 水平速度。
+# ⭐ 实测口径见 _d_新布局几何.py —— 满跳升 204px 时的横移约 63px。
+#   ⛔ 别拿"射程 211px"当跨度，那是**高度**不是水平距离，两者混用会判出跨整屏的假可达。
+JUMP_SPAN = 63.0
 
 
 print("=" * 76)
@@ -80,11 +120,15 @@ for cfg in N.NIGHTS:
         risk = "⚠ 要越界 %.0fpx" % max(0, s["x"] - cfg["border_x"]) if s["x"] > cfg["border_x"] else "区内"
         chk("  %-10s x=%-5d y=%-4d" % (s["icon"], s["x"], s["y"]),
             how is not None, "%s  %s" % (how or "⛔ 够不到", risk))
-    # 冰箱 —— ⭐ 2026-10-03 改口径：QTE 站位 = **桌面上**（背景板里冰箱下半被桌布挡住，
-    #   看得见的部分全在桌面以上；地板那侧现在是实心布墙，根本站不进去）
-    fx = N.FRIDGE["x"] + 40.0        # 冰箱段在桌面右半（570~730），取 610
-    fr = how_to_reach(fx, N.TABLE_TOP, ladder_x, ladder_top)
-    chk("  冰箱      x=%-5d y=%-4d" % (fx, N.TABLE_TOP), fr is not None,
+    # 冰箱 —— ⭐ 2026-10-04 改口径：QTE 站位 = **冰箱正前方的地板**。
+    #   旧口径是 `N.TABLE_TOP`（站茶几桌面）—— 那是冰箱压在茶几正后方时
+    #   被遮挡逼出来的 hack（背景板 v3 实测冰箱 553~735 落在桌布 395~840 内）。
+    #   冰箱挪到右墙独立段（1120~1250）后，站地板才是唯一说得通的语义。
+    #   ⛔ 判据取 x = 冰箱左沿 - 30（门朝左开，站门前），
+    #     ⛔ 不要再用 FRIDGE["x"]+40（旧值是"桌面右半"的产物，冰箱一挪就指错地方）。
+    fx = N.FRIDGE["x"] - 30.0
+    fr = how_to_reach(fx, N.FLOOR_Y, ladder_x, ladder_top)
+    chk("  冰箱      x=%-5d y=%-4d" % (fx, N.FLOOR_Y), fr is not None,
         "%s  %s" % (fr or "⛔ 够不到",
                      "⚠ 要越界 %.0fpx" % (fx - cfg["border_x"]) if fx > cfg["border_x"] else "区内"))
 
