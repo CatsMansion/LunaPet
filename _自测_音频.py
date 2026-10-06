@@ -117,6 +117,13 @@ for n in EXPECT:
         _bad_len.append(f"{n}: SND_LEN 里没有")
     elif abs(real - tbl) > 0.01:
         _bad_len.append(f"{n}: 表 {tbl}s vs 实际 {real:.2f}s")
+# ⭐ 接缝口径指纹（PR-10）—— 本条是**门禁**（时长这一维），不是接缝指标本身
+#   指纹同 _量_循环接缝.py：
+#   口径=接缝判据口径.md§一 | win=50ms(2205@44100) | rms=sqrt(mean(x^2)) | sign=见§一注1 | XF=0.8s
+#   ⚠️ 本条**只判"表里的时长 == 文件真实时长"**（容差 0.01s），⛔ 不判接缝。
+#      接缝类指标的规格在 `接缝判据口径.md`；⛔ 其中 §四「回卷跳变」**标着未启用**（等 Ronny 拍），
+#      ⛔ 因此本脚本**没有**、也**不得**把它实现成判据。
+#   ⛔ 下面那一行判据本体（`not _bad_len`）一个字都不许动。
 chk(f"⭐ {len(EXPECT)} 条的 SND_LEN 与文件真实时长一致", not _bad_len,
     "、".join(_bad_len) if _bad_len else
     "15/15 一致（%s）" % " / ".join(
