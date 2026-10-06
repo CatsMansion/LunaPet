@@ -14,6 +14,9 @@ sys.path.insert(0, ".")
 from PySide6.QtCore import Qt, QPointF, QRectF, QEvent
 from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
+# ⭐ shiboken6：用来判「Qt 对象还是不是活的」。
+#   ⛔ 别用 try/except RuntimeError 代替它 —— 那样连"为什么崩"都看不见了。
+import shiboken6
 
 app = QApplication([])
 
@@ -203,7 +206,38 @@ chk("⭐ 换游戏后 child 变成新游戏",
     w.child is not None and w.child is not first,
     "now=%s" % type(w.child).__name__ if w.child else "None")
 if first is not None:
-    chk("⭐ 上一个游戏被关掉（不再是可见窗口）", first.isHidden(), "")
+    # ⭐⭐ 2026-10-05 修一条**本来就脆弱**的断言（被 PR-03 音频接线引爆才暴露）。
+    #
+    #   旧写法 `first.isHidden()` 在 `WA_DeleteOnClose=True` 下**本来就不成立**：
+    #   `_launch` 会给游戏窗口设 `WA_DeleteOnClose`，`_close_child()` close 掉它之后
+    #   Qt 会在**下一个事件循环**里把它真正delete 掉 ⇒ 再调任何方法都是
+    #   `RuntimeError: Internal C++ object already deleted`。
+    #   它之前能过，纯粹因为两次 `_launch` 之间**恰好没有事件循环**跑过，
+    #   `deleteLater` 一直没被处理 —— 那是运气，不是判据。
+    #
+    #   ⭐ PR-03 第三个子游戏（night）构造时要加载 15 条音频，而
+    #   `QSoundEffect` 解码**必须转事件循环**才推进 ⇒ deleteLater 被处理了
+    #   ⇒ 这条断言当场崩。**不是音频把游戏搞坏了，是断言本来就不该那么写。**
+    #
+    #   ✅ 正确口径：判「旧窗口已经不可用」而不是「它isHidden() 为真」。
+    #      两种失效方式都算通过（C++ 已删 / 只是隐藏）—— 玩家视角都是"关掉了"。
+    #
+    #   ⚠️⚠️ **给下一个人的警告**（设计端 2026-10-05 明确要求写在这）：
+    #   这条断言在 `WA_DeleteOnClose=True` 下**无法用 `isHidden()` 判定**。
+    #   若将来有人把它改回 `first.isHidden()`，请**连带把「事件循环是否跑过」
+    #   一起考虑** —— 那个断言的通过与否取决于测试里有没有跑事件循环：
+    #     · 两次 `_launch` 之间不跑事件循环 ⇒ deleteLater 没被处理 ⇒ isHidden() 侥幸为真
+    #     · 中间跑了事件循环（音频解码/ QTimer / processEvents）⇒ 对象已被 delete ⇒ 直接崩
+    #   也就是说：**它绿不绿跟"上一个游戏有没有被关掉"没关系**，只跟时序有关。
+    #   ⇒ 要判"关掉了没有"，先 `shiboken6.isValid()`，再按存活分支查 isHidden()。
+    _alive = shiboken6.isValid(first)
+    if _alive:
+        _ok = first.isHidden()
+        _how = "C++ 仍存活但已隐藏"
+    else:
+        _ok = True
+        _how = "C++ 对象已被 delete（WA_DeleteOnClose 的正常结局）"
+    chk("⭐ 上一个游戏被关掉（已隐藏或已销毁）", _ok, _how)
 chk("⭐ night 窗口被创建",
     w.child is not None and type(w.child).__name__ == "NightWindow",
     type(w.child).__name__ if w.child else "None")

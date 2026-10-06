@@ -51,7 +51,13 @@ EXCLUDES = [
     "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.Qt3DInput", "PySide6.Qt3DLogic",
     "PySide6.Qt3DAnimation", "PySide6.Qt3DExtras",
     "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtGraphs",
-    "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSpatialAudio",
+    # ⛔⛔ QtMultimedia **已从排除清单移除**（2026-10-05 PR-03 第三批，音频接线）。
+    #   夜间冒险开始用 QSoundEffect 播 15 条音频 ⇒ 这个模块现在是**必需依赖**。
+    #   ⚠️ 留着它 = 打包后 `import audio` 直接 ModuleNotFoundError，
+    #   而 audio 是**函数内延迟 import** ⇒ 症状是「游戏照常玩，但一点声音都没有」，
+    #   没有任何报错指向真因（这跟 night/gamehub 那次是同一类坑）。
+    #   ⛔ 别手滑把这个名字加回来。
+    "PySide6.QtMultimediaWidgets", "PySide6.QtSpatialAudio",
     # ---- QML / Quick 家族：被 QtGui 的插件目录连带拖进来的（见下方说明）----
     "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuick3D", "PySide6.QtQuickWidgets",
     "PySide6.QtQuickControls2", "PySide6.QtVirtualKeyboard",
@@ -166,11 +172,35 @@ _pj = os.path.join(ROOT, "packs", PACK, "pet.json")
 if os.path.isfile(_pj):
     _PACK_DATAS.append((_pj, os.path.join("packs", PACK)))   # ← 目标是目录，不是文件名
 
+# ============================================================================
+# ⭐⭐ 非角色包目录（2026-10-05 PR-03 第三批补齐）
+#
+# ⛔⛔ `datas` 是**白名单** —— 不在这里列的目录**一律不进包**。
+#   `assets_audio` / `assets_game` 两个都是游戏素材，之前都漏了：
+#     · assets_audio 漏 ⇒ 打包后**完全静音**，而且**不报错**
+#       （QSoundEffect 加载失败只是 status()==Error，Qt 自己吞掉）
+#     · assets_game 漏 ⇒ 微波炉/拿东西跑的帧、场景底图、图标全缺，
+#       游戏能开但一片空白（这条比静音更难一眼看出原因）
+#
+# ⛔⛔ **第二个元素是「目标目录」，不是「目标文件路径」**（见上面那段血泪注释）。
+#   ⇒ 这里必须给**目录名**（"assets_audio"），⛔ 绝不能写成
+#     "assets_audio/某一条音效.wav" —— 那样会生成
+#     `assets_audio/某一条音效.wav/某一条音效.wav` 这种目录套文件，
+#     打包不报错、运行时找不到文件。
+# ============================================================================
+for _rel_dir in ("assets_audio", "assets_game"):
+    _src = os.path.join(ROOT, _rel_dir)
+    if os.path.isdir(_src):
+        _PACK_DATAS.append((_src, _rel_dir))
+    else:
+        # ⛔ 不 raise：spec 缺一个目录不该让打包整个失败，但必须**吵**出来
+        print("[spec] ⚠️ 找不到 %s/ —— 打包后该目录的内容会缺失" % _rel_dir)
+
 a = Analysis(
     [os.path.join(ROOT, "pet_launcher.py")],          # 打包入口（不动 run.py/core.py/ui.py）
     pathex=[os.path.join(ROOT, "pet_engine")],        # 让 core / ui 能被找到
     binaries=[],
-    # ⭐ 角色包整个塞进包里 → 用户双击 exe 就能看到宠物，不需要额外放文件
+    # ⭐ 角色包 + 游戏素材目录整个塞进包里 → 用户双击 exe 就能玩
     datas=_PACK_DATAS,
     # core.py / ui.py / ui_toolbar.py / night.py 都在 pet_engine/ 下，是被 run.py 以【顶层模块名】
     # 导入的（run.py 把 pet_engine 塞进 sys.path），静态分析看不到 → 必须逐个点名。
@@ -186,6 +216,8 @@ a = Analysis(
         "gamehub",             # ⭐ 游戏主界面（2026-10-05，函数内延迟 import）
         "hundred",             # ⭐ 小游戏「是男人就下一百层」（同上）
         "night",               # ⭐ 小游戏（函数内延迟 import）
+        "audio",               # ⭐🎵 夜间冒险音频（PR-03 第三批，同为函数内延迟 import）
+                                 #   ⛔ 漏它的症状 = 打包后完全静音，且**不报错**
         "pet_engine.console", "console",
     ],
     hookspath=[],

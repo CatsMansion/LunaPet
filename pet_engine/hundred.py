@@ -1,12 +1,38 @@
 # -*- coding: utf-8 -*-
-"""hundred.py —— 「是男人就下一百层」（Ronny 2026-10-05）
+"""hundred.py —— 「是露娜就下一百层」（Ronny 2026-10-05 改名）
 
 =====================================================================
 ⛔⛔⛔ 本文件是**独立小游戏**，⛔ 不是「深夜厨房」换皮。
    玩法铁律：**素材只管动作，容器/UI/地形由引擎绘制**。
 =====================================================================
 
-## ⭐⭐ v4 定稿：加左右键（Ronny 2026-10-05 拍板）
+## ⭐ 改名记录（Ronny 2026-10-05）
+   原名「是男人就下一百层」⇒ 改为「**是露娜就下一百层**」。
+   ⛔ 类名 `HundredWindow` / 模块名 `hundred` / 键名 `hundred` **一律不改**
+     —— 它们是代码标识符，改了会连带炸 `pet.json`、三个自测脚本和 gamehub 注册。
+     ⛔ 改名的只有**给人看的字**：窗口标题 + 标题画面大标题 + gamehub 卡片名。
+   理由：这个游戏的主角是露娜（桌宠本体），「是男人」跟角色对不上。
+
+## ⭐⭐ v5 定稿：加三种机制（Ronny 2026-10-05 拍板「少了很多机制」）
+
+### 为什么不只是加装饰 —— v4 的机制缺口是实测的
+v4 只有「跑 + 扑 + 掉」三件事，875 行里有 400 行在调物理常数。
+对比 `night.py`（2818 行，有敌人 AI / 感知 / 追逐 / 攻击三段 / QTE / 赃物 / 容器四档），
+v4 缺的**不是内容量，是玩法维度**。补的三种都改**决策结构**，不是加画面：
+
+| 机制 | 决策结构的变化 | 入口键|
+|---|---|---|
+| **每 10 层一个落脚点** | 层的性质变了：普通层是「容错窗」，落脚点是**安全点**（摔了不死 + 回血）⇒ 玩家有了「要不要赌一段」的真实抉择 | 无（自动） |
+| **金币 + 商店** | 有了**跨局资源**和**事前决策**（这一局买什么）⇒ 三键变成有取舍的顺序 | 停站时`E` |
+| **每 5 层一种障碍** | 每层要读的信号不同（横板要绕/ 齿轮要卡时机 / 灯要抢位置）⇒ 100 层不是 99 次重复 | 无（自动） |
+
+⛔ **v5 不加的东西**（避免变成堆料）：不加第二条命、不加连击、不加排行榜。
+   理由：这三样都是「让失败变宽容」，而 v4 最大的病根恰恰是**太宽容**（摔死 21%）。
+
+## v4 的输入（三键，本版不变）
+   ← → / A D  横向加速（有摩擦，能精确停住）
+   空格 / ↑ / W / 鼠标    跳（地面起跳 + 一次滞空救）
+   R 重开　Esc 退出　**E 商店（停在落脚点时）**
 
 ### 为什么必须加左右键 —— 这是量出来的结构冲突，不是偏好问题
 v3 单键版（人自动向右跑，玩家只有一个「跳」）实测出**两条要求互相矛盾**：
@@ -29,11 +55,6 @@ v3 单键版（人自动向右跑，玩家只有一个「跳」）实测出**两
   · 难度来源从「摆平台刁难」换成「操作精度」：
     平台**变窄**（360→210）+ **间距变大**（落点窗口收窄）+ 不能乱按跳
 
-## ✅ v4 的输入（三键）
-   ← → / A D  横向加速（有摩擦，能精确停住）
-   空格 / ↑ / W / 鼠标    跳（地面起跳 + 一次滞空救）
-   R 重开　Esc 退出
-
 ## 物理参数（⛔ 横向与纵向都是实测出来的，不是解析值）
    纵向沿用 v3：GRAVITY / JUMP_V 反推自「刚好跳得起一层、且跳得不高不低」。
    横向新增 RUN_ACCEL / RUN_MAX / GROUND_FRICTION ——
@@ -41,6 +62,7 @@ v3 单键版（人自动向右跑，玩家只有一个「跳」）实测出**两
      摩擦要够大（松键能刹住，否则玩家无法停在窄平台边上）。
 """
 
+import math
 import os
 import sys
 
@@ -48,8 +70,62 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
 from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QLinearGradient,
-                           QFont, QPolygonF)
+                           QFont, QFontDatabase, QFontMetricsF, QPolygonF)
 from PySide6.QtWidgets import QWidget, QApplication
+
+# ============================================================================
+# ⭐⭐ 字体注册（v5补上—— 之前**根本没有**，所以中文全是豆腐块）
+# ============================================================================
+# ⛔⛔⛔ 不注册字体的症状：**渲染"成功"、不报任何错**，只能靠肉眼看。
+#   项目里已经栽过两次（gamehub / 自测 offscreen），这次是第三次。
+#   ⛔ 判据也不能只靠"看着有字" —— 必须配量化判据，见 `_font_ok()`。
+_FONT_READY = False
+UI_FAMILY = ""
+
+
+def _ensure_font() -> str:
+    """注册中文字体，返回可用的 family 名。失败退回系统默认。"""
+    global _FONT_READY, UI_FAMILY
+    if _FONT_READY:
+        return UI_FAMILY
+    _FONT_READY = True
+    # ⭐ 按优先级试：雅黑 → 黑体 → 宋体。
+    #   ⛔ 别只写死 msyh.ttc：别的机器 / 精简系统上可能没有。
+    for path in (r"C:\Windows\Fonts\msyh.ttc",
+                 r"C:\Windows\Fonts\simhei.ttf",
+                 r"C:\Windows\Fonts\simsun.ttc"):
+        try:
+            fid = QFontDatabase.addApplicationFont(path)
+        except Exception:
+            continue
+        if fid < 0:
+            continue
+        try:
+            fams = QFontDatabase.applicationFontFamilies(fid)
+        except Exception:
+            continue
+        if fams:
+            UI_FAMILY = fams[0]
+            return UI_FAMILY
+    return UI_FAMILY
+
+
+def _f(px, bold=False):
+    """统一取字体。⛔ 别再直接_f(...) —— 那个名字
+    在字体没注册时**静默降级**成方块，不报任何错。"""
+    return QFont(_ensure_font(), px, QFont.Bold if bold else QFont.Normal)
+
+
+def _font_ok(px=32) -> bool:
+    """⭐ 字体是否真的可用的**量化判据**（不能靠肉眼）。
+
+    原理：真字体下汉字与冷僻符号宽度不同（会 fallback）；
+    字体缺失时所有字符宽度趋同（都退化成同一个豆腐块宽度）。
+    """
+    if not _ensure_font():
+        return False
+    fm = QFontMetricsF(_f(px))
+    return abs(fm.horizontalAdvance("游") - fm.horizontalAdvance("Ζ")) >= 2.0
 
 # ============================================================================
 # 逻辑坐标（与 night.py 一致：1280×720，按屏幕高度缩放）
@@ -137,6 +213,73 @@ _CATCH_F  = 2            # ⭐⭐ **落地判定范围** = 掉下去能被哪几
                          #   ⛔ 与 _WINDOW_F 拆开是必要的：两者相等时
                          #     空中修正与落点判定耦合，改手感就会连带改死亡线。
 _CATCH_Y   = 0.55        # 落在 _CATCH_F 层顶面之下这么多个层高才判死
+
+# ============================================================================
+# ⭐⭐ v5 新增：三种机制（Ronny 2026-10-05「少了很多机制」）
+# ============================================================================
+#
+# ⛔ 设计纪律（v4 最大的病根是**太宽容**：摔死 21%）：
+#   加的每一样都必须让玩家**做选择**，不能是「让失败变宽容」的补偿。
+#   ⇒ 不加第二条命 / 不加连击 / 不加排行榜 —— 那些只会稀释难度。
+#
+# ── 机制一：落脚点（每 10 层）────────────────────────────────────────
+# ⭐ 它改的是「层的性质」：普通层是容错窗（摔了用滞空救），
+#   落脚点是**安全点**（摔了直接接住 + 回血）⇒ 玩家每10 层要决定：
+#   「多花一层时间攒金币，还是赌下一段直接跑」。
+LANDING_EVERY   = 10          # 每 10 层一个落脚点
+LANDING_HP      = 1           # 摔到落脚点 = 不死（直接被接住）
+LANDING_BONUS_W = 34.0        # ⭐ 落脚点比同层普通层**宽多少**（绝对量，不是比例）
+                              #   ⛔ 不是 `max(116, 普通宽)` —— 那样前 10 层不生效
+                              #     （第 10 层普通宽已有 346，max 永远挑它）
+                              #   ✅ 相对加宽：任何深度都比邻居宽，深层尤其需要
+LANDING_MIN_W   = 150.0       # 落脚点绝对下限（防止深层算出来太窄）
+# ⛔ 落脚点也是**唯一能买东西的地方** ⇒ 商店与它是同一个决策点，不占额外按键。
+#
+# ── 机制二：金币 + 商店（跨局资源 + 事前决策）─────────────────────────
+COIN_PER_FLOOR  = 1# 常规层给1 枚
+COIN_LANDING_BONUS = 5         # ⭐ 落脚点额外给 5 枚（把"绕远路攒钱"做成选项）
+START_COINS     = 0           # ⛔ 不给初始金币：第一层的抉择必须是"冒险还是稳"
+
+# ⭐ 商店三样，每样都改一条物理参数（不是纯加分）
+SHOP_ITEMS = [
+    # (key, 名称, 价格, 说明, 效果字段, 效果值)
+    ("air", "轻身", 12, "空中救一次可以用两次", "air_jumps", 2),
+    ("grip", "抓地", 10, "松手刹得更狠，站得住窄边", "fric_mul", 1.7),
+    ("lift", "弹跳", 14, "下扑初速更大，窗口更宽", "dive_mul", 1.22),
+]
+# ⭐ 价格随购买次数递增（否则最优解是"攒够钱一次全买"）
+def shop_price(base, bought: int) -> int:
+    return int(base + base * 0.6 * bought)
+
+# ── 机制三：障碍（每 5 层换一种）────────────────────────────────────────
+# ⭐ 为什么要障碍：v4 的 100 层是**同一件事做 99 次**。
+#   障碍让每层要读的信号不同 —— 横板要绕开落点、齿轮要卡时机、
+#   灯要抢位置。⇒ 100 层不是 99 次重复。
+OBSTACLE_EVERY  = 5           # 每 5 层换一种（0/1/2/3 循环，之后不再出现）
+# 三种障碍的**参数**（⛔ 数值都写在这里，自测要量它们）
+BAR_W           = 132.0       # 横板半宽（碰到就是"这一层落点被占掉一半"）
+GEAR_R          = 58.0        # 齿轮半径（碰到就弹开）
+GEAR_PERIOD     = 2.4         # 齿轮转一圈的秒数（越往下越快）
+GEAR_MIN_PERIOD = 1.1
+LAMP_R          = 76.0        # 灯的判定半径（站在里面会被发现 → 惊动）
+
+
+def obstacle_kind(f: int) -> int:
+    """第 f 层用哪种障碍。0=无 1=横板 2=齿轮 3=灯。
+
+    ⭐ **只在前 30 层出现**（OBSTACLE_EVERY=5 ⇒ 0~29 共 6 轮），
+    30 层之后一律返回 0（无障碍）。
+    理由：深处平台已经只有 210px 宽，再叠障碍就是纯运气；
+    而前 30 层是玩家建立手法的地方，那里给变化最有价值。
+    """
+    if f < 6 or f > 29:
+        return 0
+    return ((f - 6) // OBSTACLE_EVERY) % 3 + 1
+
+
+def is_landing(f: int) -> bool:
+    """第 f 层是不是落脚点（第 10/20/…/100 层）。"""
+    return f % LANDING_EVERY == 0
                          #   （给最后一级容错，别让擦边坠落算摔）
 _DIVE_T   = (-DIVE_V + (DIVE_V * DIVE_V + 2.0 * GRAVITY * FLOOR_H * _WINDOW_F) ** 0.5) / GRAVITY
                          # ⭐ 下潜 _WINDOW_F 层的下落时间（解析）
@@ -197,13 +340,29 @@ _FULL_ARC = None          # 兼容旧名（= _CTRL_SPAN）
 
 
 def plat_width(f: int) -> float:
-    """第 f 层平台宽度。f 从 1 起。
+    """第 f 层平台宽度。f从 1 起。
 
     ⭐ 难度来源之一：宽度线性收窄。⛔ 不做平台移动 —— 平台一动，
       玩家就得盯着看，而这个游戏的乐趣在**落点判断**上。
+
+    ⭐⭐ v5：**落脚点加宽**。
+
+    ## ⛔⚠️ 这里踩过一个坑，别重犯
+    第一版我写的是 `max(LANDING_WIDTH=116, 普通宽度)` ⇒ **前 10 层完全没生效**：
+    第 10 层的普通宽度已经有 346px，远大于 116，`max` 挑了346。
+    ⛔ 用 `max` 就等于「窄层加宽、宽层不动」—— 而**深层恰恰是最需要安全点的地方**。
+    ✅ 正确：**无条件加一段绝对量**（相对加宽），
+    这样第 10 层 +34、第 90 层 +34，落脚点在任何深度都"比邻居宽"。
+
+    ⛔ 也不能做成"全游戏最宽"：那会让玩家在落脚点无脑停下，
+    失去"要不要在这里花时间"的意义。加 34 = 深层普通层(210) 的 1.16×，
+    够宽到能安心落脚，又仍然需要玩家主动停稳。
     """
     t = (f - 1) / float(TARGET_FLOOR - 1)
-    return 360.0 - 150.0 * t           # 360 → 210
+    w = 360.0 - 150.0 * t                    # 360 → 210
+    if is_landing(f):
+        w = max(w + LANDING_BONUS_W, LANDING_MIN_W)
+    return w
 
 
 def plat_center(f: int) -> float:
@@ -290,6 +449,11 @@ class Climber:
         self.face = 1
         self.leg = 0.0
         self.squash = 0.0
+        # --- ⭐ v5：商店效果（默认 1.0 / AIR_JUMPS = 没买）---
+        # ⛔ 都做成**乘性倍率**而不是改常量：常量是全局的，改了会连带影响
+        #   落点判定与死亡线（v4.1 那次教训：_WINDOW_F 一个常量两个用途已经炸过一次）。
+        #   乘性倍率只影响「玩家自己能控制的那部分」，判定线不动。
+        self.boost = {"air_jumps": AIR_JUMPS, "fric_mul": 1.0, "dive_mul": 1.0}
 
     def step_vertical(self, dt):
         """⭐ 纵向积分（每帧**先加重力后位移**，与 night.py 同一套 ⇒ 跳高实测比解析值小）。"""
@@ -325,8 +489,11 @@ class Climber:
             self.vx += dir_in * acc * dt
             self.face = 1 if dir_in > 0 else -1
         else:
-            # --- 松手：摩擦把 vx 拉向 0，且不越过 0 ---
-            fric = GROUND_FRIC if self.on_ground else AIR_FRIC
+            # --- 松手：摩擦把 vx 拉向0，且不越过 0 ---
+            # ⭐ v5：乘商店的 fric_mul（抓地）。⛔ 只放大"松手刹车"，
+            #   不动RUN_ACCEL —— 加速不变、刹车变强 = 站得住但起手不变，
+            #   不会顺带把"平台间移动太肉"这个老毛病改掉。
+            fric = (GROUND_FRIC if self.on_ground else AIR_FRIC) * self.boost["fric_mul"]
             if abs(self.vx) <= fric * dt:
                 self.vx = 0.0
             else:
@@ -361,20 +528,26 @@ class Climber:
         """
         if not self.alive:
             return False
+        # ⭐ v5：下扑初速乘商店倍率（「弹跳」）。
+        #   ⛔ 只改初速、不改 _WINDOW_F / _CATCH_F —— 落地判定与死亡线是**正确性**，
+        #     让购买项去动它们会把"操作手感"和"能不能被接住"耦合起来
+        #     （v4.1 拆常量的教训：同一常量两个用途必然要炸）。
+        dive = DIVE_V * self.boost["dive_mul"]
+        jumps = int(self.boost["air_jumps"])
         if self.on_ground:
             # ⭐ 下扑：vy 为正 = 向下
-            self.vy = DIVE_V
+            self.vy = dive
             self.on_ground = False
-            # ⭐ 这里必须留满 AIR_JUMPS，不是 AIR_JUMPS-1。
+            # ⭐ 这里必须留满额度，不是额度-1。
             #   滞空救的语义是"**离开平台之后**还能再救一次"，
             #   地面起跳的那一次已经用掉了「地面跳」这个额度，
             #   不该再额外来扣空中救的额度 —— 早先写 -1，
             #   等于第一次滞空救直接被吞，掉落中再也救不回来。
-            self.air_jumps = AIR_JUMPS
+            self.air_jumps = jumps
             return True
         if self.air_jumps > 0:
             # 滞空救 = 减缓下坠（往回抬一下），给玩家再争取一点横移时间
-            self.vy = -DIVE_V * 0.55
+            self.vy = -dive * 0.55
             self.air_jumps -= 1
             return True
         return False
@@ -401,7 +574,7 @@ class HundredWindow(QWidget):
     def __init__(self, pack=None):
         super().__init__()
         self.pack = pack
-        self.setWindowTitle("猫猫公寓 · 是男人就下一百层")
+        self.setWindowTitle("猫猫公寓 · 是露娜就下一百层")
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
         self.setAttribute(Qt.WA_OpaquePaintEvent, False)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -412,7 +585,7 @@ class HundredWindow(QWidget):
         self.setFixedSize(int(VW * self.k), int(VH * self.k))
 
         # ---- 状态 ----
-        self.phase = "title"          # title | play | dead | win
+        self.phase = "title"          # title | play | dead | win | shop
         self.floor = 1
         self.best = 0
         self.hero = None
@@ -427,6 +600,24 @@ class HundredWindow(QWidget):
         self.fell_from = 0            # 从第几层掉下去的（死亡文案用）
         # ⭐ v4：左右键是**按住**生效的（不是按下瞬间）⇒ 必须记按住状态
         self.keys = set()
+        # ---- ⭐ v5 新增状态 ----
+        self.coins = START_COINS
+        self.bought = {}              # {item_key: 次数}
+        self.shop_sel = 0
+        self.gear_ang = 0.0           # 齿轮当前角度（rad，累加）
+        self.gear_hit_flash = 0.0
+        self.bar_off = 0.0            # 横板当前偏移（sin 往复）
+        self.alarm = 0.0              # 被灯发现后的红色警示（秒）
+        self.on_landing = False# 当前站在落脚点上？⇒ 决定 E 能不能开商店
+        self.landings_hit = 0         # 本局踩过的落脚点数（用于文案）
+        self.shop_msg = ""            # 商店里的购买反馈
+        # ⭐ v5：障碍动画用的全局时间轴。⛔ 别用 dt 累加当相位 ——
+        #   那样每次开商店/死亡再回来，相位会跳变（障碍瞬移）。
+        self._t_global = 0.0
+        # ⭐ 障碍自己的相位。⛔ 不读 _t_global（理由见 _step_obstacles 的docstring）
+        self.bar_t = 0.0
+        # ⭐ 被齿轮撞后的硬直秒数（0= 可操作）
+        self.hit_lock = 0.0
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -443,6 +634,19 @@ class HundredWindow(QWidget):
         self.trail = []
         self.keys = set()
         self.dead_t = self.win_t = self.shake = 0.0
+        # --- ⭐ v5 重置（⛔ 漏重置会让上一局的商店状态漏进下一局）---
+        self.coins = START_COINS
+        self.bought = {}
+        self.shop_sel = 0
+        self.gear_ang = 0.0
+        self.gear_hit_flash = 0.0
+        self.bar_t = 0.0
+        self.bar_off = 0.0
+        self.hit_lock = 0.0
+        self.alarm = 0.0
+        self.on_landing = False
+        self.landings_hit = 0
+        self.shop_msg = ""
         self.phase = "play"
         self._say("← → 移动　空格 跳。落到下一层就算过。", 2.8)
 
@@ -454,11 +658,37 @@ class HundredWindow(QWidget):
     # ------------------------------------------------------------ 输入
     def keyPressEvent(self, ev):
         k = ev.key()
+        # ⭐ v5：商店里Esc = 关商店（不是关窗口），⛔ 必须在最前面拦
+        if self.phase == "shop":
+            if k == Qt.Key_Escape:
+                self.phase = "play"
+                return
+            if k in (Qt.Key_Up, Qt.Key_W):
+                self.shop_sel = (self.shop_sel - 1) % len(SHOP_ITEMS)
+                return
+            if k in (Qt.Key_Down, Qt.Key_S):
+                self.shop_sel = (self.shop_sel + 1) % len(SHOP_ITEMS)
+                return
+            if k in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter, Qt.Key_E):
+                self._buy()
+                return
+            if k == Qt.Key_R:
+                self.start()
+            return
         if k == Qt.Key_Escape:
             self.close()
             return
         if k == Qt.Key_R:
             self.start()
+            return
+        # ⭐ v5：E 开商店（⛔ 只在落脚点上、且站着，才开）
+        if k == Qt.Key_E:
+            if self.phase == "play" and self.on_landing and self.hero.on_ground:
+                self.phase = "shop"
+                self.shop_sel = 0
+                self.shop_msg = ""
+            elif self.phase == "play":
+                self._say("商店只在落脚点开", 1.2)
             return
         if k in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter, Qt.Key_Up, Qt.Key_W):
             self._press()
@@ -479,6 +709,37 @@ class HundredWindow(QWidget):
         if k in (Qt.Key_Right, Qt.Key_D):
             self.keys.discard(1)
 
+    # ------------------------------------------------------------ 商店
+    def _buy(self):
+        """买当前选中的商品。钱不够 / 已买满 → 给反馈，不静默。"""
+        key, name, base, desc, field, val = SHOP_ITEMS[self.shop_sel]
+        times = self.bought.get(key, 0)
+        # ⛔ 限购：每样最多 2 次。理由见 SHOP_ITEMS 上方的设计纪律 ——
+        #   加成是为了"做个选择"，不是无限叠数值。
+        if times >= 2:
+            self.shop_msg = "%s 已经买满 2 次了" % name
+            return
+        price = shop_price(base, times)
+        if self.coins < price:
+            self.shop_msg = "钱不够：%s 要 %d 枚，你现在 %d 枚" % (name, price, self.coins)
+            return
+        self.coins -= price
+        self.bought[key] = times + 1
+        h = self.hero
+        if field == "air_jumps":
+            h.boost["air_jumps"] = float(AIR_JUMPS + val * (times + 1))
+            # ⛔ 买了要立刻生效一次：否则玩家买了"轻身"但这一局落地前还用旧值
+            h.air_jumps = int(h.boost["air_jumps"])
+        elif field == "fric_mul":
+            h.boost["fric_mul"] = val ** (times + 1)
+        elif field == "dive_mul":
+            h.boost["dive_mul"] = val ** (times + 1)
+        self.shop_msg = "买了 %s（%d 枚）" % (name, price)
+
+    def _shop_price_of(self, idx: int) -> int:
+        key = SHOP_ITEMS[idx][0]
+        return shop_price(SHOP_ITEMS[idx][2], self.bought.get(key, 0))
+
     def _dir(self) -> int:
         """当前按住的横向输入：左右同时按 = 0（互相抵消）。"""
         return (1 if 1 in self.keys else 0) - (1 if -1 in self.keys else 0)
@@ -491,7 +752,9 @@ class HundredWindow(QWidget):
             self.start()
             return
         if self.phase == "play":
-            if self.hero.jump():
+            # ⭐ v5：硬直期间不能起跳。⛔ 不禁的话玩家狂按跳就能逃掉硬直，
+            #   障碍的代价就没了 —— 那硬直只是个视觉装饰。
+            if self.hit_lock <= 0.0 and self.hero.jump():
                 self.flash = 0.18
             return
         if self.phase == "dead":
@@ -513,19 +776,117 @@ class HundredWindow(QWidget):
         self.flash = max(0.0, self.flash - dt)
         self.shake = max(0.0, self.shake - dt * 3.2)
         self.msg_t = max(0.0, self.msg_t - dt)
+        self.gear_hit_flash = max(0.0, self.gear_hit_flash - dt * 2.0)
+        self.alarm = max(0.0, self.alarm - dt)
+        self._t_global += dt
         if self.phase == "play":
+            # --- ⭐ v5 障碍动画：即使玩家在 play，齿轮/横板也要继续走 ---
+            self._step_obstacles(dt)
             self._step_play(dt)
+        elif self.phase == "shop":
+            # ⭐ v5：商店是**暂停**。⛔ 不调 _step_play —— 开着商店继续掉下去
+            #   会让玩家在读文案的时候摔死，这不是"暂停"是"惩罚"。
+            #   但齿轮/横板继续走（视觉上世界还在动，读得懂这是暂停不是卡了）。
+            self._step_obstacles(dt)
         elif self.phase == "dead":
             self.dead_t += dt
         elif self.phase == "win":
             self.win_t += dt
         self.update()
 
+    # ------------------------------------------------------------ v5 障碍
+    def _obstacle_period(self):
+        """齿轮当前周期（秒）。⭐ 越往下越快，封在 GEAR_MIN_PERIOD。"""
+        d = min(1.0, self.floor / float(TARGET_FLOOR))
+        return max(GEAR_MIN_PERIOD, GEAR_PERIOD - 1.3 * d)
+
+    def _step_obstacles(self, dt):
+        """推进障碍动画。⛔ 纯视觉 + 碰撞判定的状态，不改角色物理。
+
+        ⭐ 障碍的相位**自己累加**（`self.bar_t`），不读 `self._t_global`。
+        理由：`_t_global` 在 `_tick` 里推进，而商店阶段调的是
+        `_step_obstacles`（不调 `_tick`）⇒ 读 _t_global 会让横板在开商店时
+        卡住不动，恢复后瞬移。⇒ 相位必须跟障碍自己的更新绑在一起。
+        """
+        self.bar_t += dt
+        self.gear_ang = (self.gear_ang + dt / self._obstacle_period() * 2.0 * 3.14159265) % (2.0 * 3.14159265)
+        # 横板往复：cos 驱动，周期 2π/1.85 ≈ 3.4s
+        self.bar_off = 46.0 * (0.5 - 0.5 * math.cos(self.bar_t * 1.85))
+
+    def _obstacle_hit(self, f: int, h):
+        """第 f 层的障碍是否碰到角色。碰到就返回True（并施加效果）。
+
+        ⭐ 三种障碍的**作用位置不同**，这是设计：
+          横板 —— 挡**落点**（站在平台上时被占掉位置，要绕）
+          齿轮 —— 挡**路径**（碰了被弹开，横向失控）
+          灯   —— 判**站位**（站在光圈里被发现，扣分式的惊动）
+        """
+        kind = obstacle_kind(f)
+        if kind == 0 or h is None:
+            return False
+        # 只判「当前层和下一层」——⛔ 不遍历 100 层（paint 同理）
+        if f < self.floor or f > self.floor + _CATCH_F:
+            return False
+        py = self._plat_y(f)
+        # 角色中心（用身体中心而不是脚底，灯的判定才合理）
+        rx, ry = h.x, h.y - 21.0
+        if kind == 1:
+            # 横板：在层顶面上方 30px，往复横移
+            bx = plat_center(f) + self.bar_off
+            by = py - 30.0
+            if abs(rx - bx) < BAR_W * 0.5 and abs(ry - by) < 40.0:
+                return True
+        elif kind == 2:
+            # 齿轮：绕平台中心转，碰到就弹开
+            cx = plat_center(f)
+            cy = py - 34.0
+            # ⭐⭐ 每层用**自己的相位**（按层号错开），不是全局同一个角度。
+            #   ⛔ 用全局角的话，视野内 4 层会画出 4 个**一模一样**的齿轮 ——
+            #     看起来像"一团东西"，而且玩家会以为它在同一个位置转。
+            #   ✅ 按层错开后，四个齿轮是同步反向转的独立机构（像钟表齿轮列），
+            #     玩家能看出"这一层的障碍在什么位置"。
+            a = self.gear_ang + f * 1.7
+            gx = cx + math.cos(a) * (BAR_W * 0.42)
+            gy = cy + math.sin(a) * 22.0
+            if ((rx - gx) ** 2 + (ry - gy) ** 2) ** 0.5 < GEAR_R:
+                # ⛔⛔⛔ 这里原来写的是 `vx += ±340`。**那是设计缺陷**，已改：
+                #   339px 宽的平台上被横向打 340px/s ⇒ 0.15s 就出平台 ⇒ 必摔。
+                #   而 f11~f15 连着 5 层全是齿轮 ⇒ 玩家在那一段**无论多准都过不去**，
+                #   障碍就从"增加难度"变成了"设置不可通关的墙"（实测全策略都卡死）。
+                # ✅ 正确：弹开只**短暂夺走控制权**（把 vx 压到很小），
+                #   惩罚是"操作失灵 + 硬直 0.22s"，玩家仍有机会救回来。
+                #   ⛔ 别改回大冲量：`_自测_一百层v5.py` 的「全 100 层可解性」
+                #   会把这类改动抓出来。
+                h.vx *= 0.18
+                self.shake = 0.8
+                self.gear_hit_flash = 1.0
+                self.hit_lock = 0.22          # ⭐ 硬直秒数
+                return True
+        elif kind == 3:
+            # 灯：光圈判定
+            cx = plat_center(f)
+            cy = py - 26.0
+            if ((rx - cx) ** 2 + (ry - cy) ** 2) ** 0.5 < LAMP_R:
+                self.alarm = 1.0
+                return True
+        return False
+
     def _step_play(self, dt):
         h = self.hero
 
+        # ⭐ v5：被齿轮撞到后的**硬直**（短暂无法操作）。
+        #   为什么要硬直而不是纯视觉：不给任何代价，障碍就只是装饰；
+        #   给"必定坠落"那种代价，玩家会卡死（实测第 15 层）。
+        #   ⇒ 代价 = 「操作失灵 + 硬直」，玩家仍有机会救回来。
+        if self.hit_lock > 0.0:
+            self.hit_lock = max(0.0, self.hit_lock - dt)
+
         # --- 水平：玩家可控（v4 新增）---
-        h.step_horizontal(self._dir(), dt)
+        #⛔ 硬直期间屏蔽输入（靠 `self.keys` 清空 + 摩擦自然刹住）
+        if self.hit_lock > 0.0:
+            h.step_horizontal(0, dt)
+        else:
+            h.step_horizontal(self._dir(), dt)
         # ⭐ 屏幕边界：夹在 [身体半宽, VW−身体半宽]。
         #   ⛔ 平台全在屏内（v4 的布局前提），所以角色也必须在屏内，
         #     否则会出现「站在平台外的空气上」。
@@ -593,7 +954,10 @@ class HundredWindow(QWidget):
                 if f < 1 or f > TARGET_FLOOR:
                     continue
                 py = self._plat_y(f)
-                w = plat_width(f)
+                # ⭐⭐ v5：落脚点**要宽到能兜住人**。plat_width 里落脚点加宽到 116，
+                #   但玩家可能落在宽平台的边缘外侧一点 ⇒ 这里额外给 8px 容差，
+                #   免得"安全点"因为差几像素变杀手，那玩家就不敢停上来了。
+                w = plat_width(f) + (16.0 if is_landing(f) else 0.0)
                 cx = plat_center(f)
                 if not (cx - w / 2.0 - BODY_W * 0.5 <= h.x <= cx + w / 2.0 + BODY_W * 0.5):
                     continue
@@ -604,7 +968,7 @@ class HundredWindow(QWidget):
                 h.y = float(best)
                 h.vy = 0.0
                 h.on_ground = True
-                h.air_jumps = AIR_JUMPS
+                h.air_jumps = int(h.boost["air_jumps"])
                 # ⭐⭐ 落地刹速**必须 gate 在 was_air 上**。
                 #   ⛔⛔ v4.1 修掉的死 bug：不 gate 的话，「站着不动」时
                 #     落地判定每帧都重新成立（vy 被重力加到 >0，
@@ -615,11 +979,24 @@ class HundredWindow(QWidget):
                 #     症状：按着右键跑，屏幕上一寸一寸挪，快到像没生效。
                 if was_air:
                     # 落地就把横向速度刹掉大半 —— 否则角色会在平台上打滑，
-                    # 玩家明明站住了却一直往边缘漂（night.py 踩过"落地要清速度"）。
+                    # 玩家明明站住了却一直往边缘漂（night.py踩过"落地要清速度"）。
                     h.vx *= 0.4
                     self.shake = 0.55
                     h.squash = 1.0
-                    self._arrive(f_of_y(best))
+                    # --- ⭐ v5：金币 + 障碍 ---
+                    landed = f_of_y(best)
+                    self.coins += COIN_PER_FLOOR
+                    if is_landing(landed):
+                        self.coins += COIN_LANDING_BONUS
+                        self.landings_hit += 1
+                        self._say("落脚点！+%d 枚　按 E 买东西" % COIN_LANDING_BONUS, 2.0)
+                    if self._obstacle_hit(landed, h):
+                        #⛔ 障碍只在**落地那一刻**判一次，不做持续重叠判定 ——
+                        #   持续判定会让玩家站着不动就一直被弹开（物理被外力接管，
+                        #   玩家失去控制权，那不是障碍是 bug）。
+                        #   ⇒ 判一次 → 玩家有反应时间跑开。
+                        self._say("被机关撞了", 1.0)
+                    self._arrive(landed)
         if h.squash > 0.0:
             h.squash = max(0.0, h.squash - dt * 4.0)
         if h.on_ground:
@@ -637,6 +1014,10 @@ class HundredWindow(QWidget):
                     self.phase = "win"
                     self.win_t = 0.0
                     return
+            # ⭐ v5：记录「是否站在落脚点上」⇒ 决定 E 能不能开商店。
+            #   ⛔ 必须在**站着**时才为真：滞空路过落脚点不能开商店，
+            #     否则玩家在掉的过程中就能凭空开面板，机制一就漏了。
+            self.on_landing = is_landing(self.floor)
 
         # --- 镜头跟随（只跟"往下"，不跟"往上"—— 往上跳时画面别乱晃）---
         #   ⛔⛔ 绝不能用「掉出画面底」判死：镜头是绝对跟随，
@@ -725,12 +1106,81 @@ class HundredWindow(QWidget):
         self._draw_hud(p)
         if self.phase in ("title", "dead", "win"):
             self._draw_overlay(p)
+        elif self.phase == "shop":
+            self._draw_shop(p)
         p.end()
+
+    def _draw_shop(self, p):
+        """商店面板。⛔ 纯程序绘制（素材只管动作，UI 由引擎画）。"""
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(6, 7, 12, 205))
+        p.drawRect(QRectF(0, 0, VW, VH))
+        # 标题
+        p.setFont(_f(30, bold=True))
+        p.setPen(QPen(QColor(255, 226, 170)))
+        p.drawText(QRectF(0, 84, VW, 44), Qt.AlignCenter, "落脚点商店")
+        p.setFont(_f(15, bold=True))
+        p.setPen(QPen(QColor(255, 206, 128)))
+        p.drawText(QRectF(0, 130, VW, 28), Qt.AlignCenter, "● 你有 %d 枚" % self.coins)
+        # 三样商品
+        y0 = 188.0
+        for i, (key, name, base, desc, field, val) in enumerate(SHOP_ITEMS):
+            y = y0 + i * 104.0
+            sel = (i == self.shop_sel)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(38, 34, 28) if sel else QColor(20, 20, 26))
+            p.drawRoundedRect(QRectF(300, y, 680, 84.0), 10, 10)
+            if sel:
+                p.setBrush(QColor(255, 206, 128))
+                p.drawRoundedRect(QRectF(300, y, 6.0, 84.0), 3, 3)
+            p.setFont(_f(19, bold=True))
+            p.setPen(QPen(QColor(255, 232, 190) if sel else QColor(196, 200, 218)))
+            p.drawText(QRectF(324, y + 10, 300, 30), Qt.AlignLeft | Qt.AlignVCenter,
+                       ("> " if sel else "") + name)
+            p.setFont(_f(12))
+            p.setPen(QPen(QColor(166, 172, 196)))
+            p.drawText(QRectF(324, y + 44, 420, 26), Qt.AlignLeft | Qt.AlignVCenter, desc)
+            # 价格 / 已买满
+            times = self.bought.get(key, 0)
+            price = shop_price(base, times)
+            if times >= 2:
+                p.setFont(_f(16, bold=True))
+                p.setPen(QPen(QColor(150, 154, 176)))
+                p.drawText(QRectF(920, y + 26, 40, 30), Qt.AlignRight | Qt.AlignVCenter, "满")
+            else:
+                afford = self.coins >= price
+                p.setFont(_f(17, bold=True))
+                p.setPen(QPen(QColor(255, 206, 128) if afford else QColor(150, 120, 110)))
+                p.drawText(QRectF(840, y + 26, 120, 30), Qt.AlignRight | Qt.AlignVCenter,
+                           "%d 枚" % price)
+                p.setFont(_f(10))
+                p.setPen(QPen(QColor(140, 146, 168)))
+                p.drawText(QRectF(760, y + 58, 200, 20), Qt.AlignRight | Qt.AlignVCenter,
+                           "已买 %d / 2" % times)
+        # 购买反馈
+        if self.shop_msg:
+            p.setFont(_f(14))
+            p.setPen(QPen(QColor(255, 226, 170)))
+            p.drawText(QRectF(0, y0 + 3 * 104.0 + 18, VW, 26), Qt.AlignCenter, self.shop_msg)
+        p.setFont(_f(12))
+        p.setPen(QPen(QColor(150, 156, 180)))
+        p.drawText(QRectF(0, y0 + 3 * 104.0 + 54, VW, 24), Qt.AlignCenter,
+                   "W / S 选　·　空格 买　·　E / Esc 关上继续往下掉")
 
     def _draw_floor(self, p, f, is_cur):
         w = plat_width(f)
         cx = plat_center(f)
         y = self._plat_y(f)
+        # ⭐⭐ v5：落脚点 = **安全点**，视觉上必须一眼可辨
+        #（否则玩家不会想到要停上来，机制一等于不存在）
+        landing = is_landing(f)
+        if landing:
+            # 发光的暖色底 + 上边缘高亮条
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(58, 44, 30, 255))
+            p.drawRoundedRect(QRectF(cx - w / 2.0, y - 2, w, 16.0), 5, 5)
+            p.setBrush(QColor(255, 206, 128, 220))
+            p.drawRoundedRect(QRectF(cx - w / 2.0, y - 4, w, 4.0), 2, 2)
         # 楼板：右侧往下收细 —— 暗示"跑出去就没了"
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(126, 108, 96) if is_cur else QColor(66, 72, 96))
@@ -744,9 +1194,61 @@ class HundredWindow(QWidget):
         p.setBrush(QColor(0, 0, 0, 92))
         p.drawRect(QRectF(cx - w / 2.0 + 10, y + 14, max(4.0, w - 20.0), 10))
         if f >= self.floor - 1 and f <= self.floor + 2:
-            p.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
-            p.setPen(QPen(QColor(230, 216, 190) if is_cur else QColor(146, 152, 176)))
+            p.setFont(_f(11, bold=True))
+            col = (255, 214, 150) if landing else ((230, 216, 190) if is_cur else (146, 152, 176))
+            p.setPen(QPen(QColor(*col)))
             p.drawText(QRectF(cx - 40, y - 27, 80, 20), Qt.AlignCenter, "%d" % f)
+            # ⭐ 落脚点在层号下面加一行标签：写明"这里能买东西"
+            if landing:
+                p.setFont(_f(9))
+                p.setPen(QPen(QColor(255, 206, 128, 200)))
+                p.drawText(QRectF(cx - 50, y - 42, 100, 16), Qt.AlignCenter, "落脚点 · E")
+        # --- ⭐ v5 障碍绘制 ---
+        if f >= self.floor - 1 and f <= self.floor + 2:
+            self._draw_obstacle(p, f, cx, y)
+
+    def _draw_obstacle(self, p, f, cx, y):
+        kind = obstacle_kind(f)
+        if kind == 0:
+            return
+        if kind == 1:
+            # 横板：往复移动的厚板，占掉一半落点
+            bx = cx + self.bar_off
+            by = y - 30.0
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(120, 96, 140))
+            p.drawRoundedRect(QRectF(bx - BAR_W * 0.5, by - 11, BAR_W, 22.0), 6, 6)
+            p.setBrush(QColor(168, 140, 196, 200))
+            p.drawRoundedRect(QRectF(bx - BAR_W * 0.5, by - 11, BAR_W, 5.0), 3, 3)
+        elif kind == 2:
+            # 齿轮：一个真转的齿轮（⛔ 转起来才看得出要卡时机）
+            # ⭐⭐ 相位必须与 _obstacle_hit 里**完全一致**（按层错开）——
+            #   画的位置和判的位置不一样 = 玩家看到空的地方被判到，最难debug。
+            gcx = cx + math.cos(self.gear_ang + f * 1.7) * (BAR_W * 0.42)
+            gcy = y - 34.0 + math.sin(self.gear_ang + f * 1.7) * 22.0
+            hit = self.gear_hit_flash > 0.05
+            p.setPen(QPen(QColor(255, 150, 130) if hit else QColor(196, 168, 116), 4.0))
+            p.setBrush(QColor(70, 62, 48) if not hit else QColor(96, 50, 44))
+            p.drawEllipse(QPointF(gcx, gcy), GEAR_R, GEAR_R)
+            # 齿
+            a0 = self.gear_ang + f * 1.7
+            for i in range(6):
+                a = a0 + i * 3.14159265 / 3.0
+                p.setBrush(QColor(196, 168, 116) if not hit else QColor(255, 150, 130))
+                p.drawRect(QRectF(gcx + math.cos(a) * GEAR_R - 6, gcy + math.sin(a) * GEAR_R - 6, 12, 12))
+        elif kind == 3:
+            # 灯：地面光圈 + 灯体
+            lcx, lcy = cx, y - 26.0
+            alarm = self.alarm > 0.05
+            p.setPen(QPen(QColor(255, 110, 96, 120) if alarm else QColor(255, 208, 120, 90), 3.0))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QPointF(lcx, lcy), LAMP_R, LAMP_R * 0.62)
+            p.setBrush(QColor(255, 200, 130) if alarm else QColor(198, 170, 110))
+            p.drawEllipse(QPointF(lcx, y - 48.0), 11.0, 8.0)
+            if alarm:
+                p.setFont(_f(9, bold=True))
+                p.setPen(QPen(QColor(255, 140, 110)))
+                p.drawText(QRectF(lcx - 40, y - 76, 80, 18), Qt.AlignCenter, "被发现！")
 
     def _draw_hero(self, p, h):
         """纯程序绘制。⛔ 不画脸（2.5 头身资源全是侧面手绘，程序正面小人掉档）。
@@ -798,14 +1300,26 @@ class HundredWindow(QWidget):
         p.restore()
 
     def _draw_hud(self, p):
-        p.setFont(QFont("Microsoft YaHei", 13, QFont.Bold))
+        p.setFont(_f(13, bold=True))
         p.setPen(QPen(QColor(238, 228, 202)))
         p.drawText(QRectF(24, 18, 420, 26), Qt.AlignLeft | Qt.AlignVCenter,
                    "第 %d / %d 层" % (min(self.floor, TARGET_FLOOR), TARGET_FLOOR))
-        p.setFont(QFont("Microsoft YaHei", 11))
+        p.setFont(_f(11))
         p.setPen(QPen(QColor(168, 174, 196)))
         p.drawText(QRectF(24, 42, 520, 22), Qt.AlignLeft | Qt.AlignVCenter,
                    "最好 %d 层　·　← → 移动　空格 跳（空中还能救一次）" % self.best)
+        # --- ⭐ v5：金币 + 商店提示 ---
+        p.setFont(_f(15, bold=True))
+        p.setPen(QPen(QColor(255, 206, 128)))
+        p.drawText(QRectF(VW - 200, 16, 176, 28), Qt.AlignRight | Qt.AlignVCenter,
+                   "● %d 枚" % self.coins)
+        if self.on_landing and self.hero is not None and self.hero.on_ground:
+            # ⭐ 站在落脚点上才闪这个提示 —— 玩家一眼知道"这里能买东西"
+            blink = 0.62 + 0.38 * math.sin(self._t_global * 5.0)
+            p.setFont(_f(13, bold=True))
+            p.setPen(QPen(QColor(255, 236, 190, int(255 * blink))))
+            p.drawText(QRectF(0, 116, VW, 26), Qt.AlignCenter,
+                       "落脚点　按 E 打开商店")
         bw, by = 460.0, 64.0
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255, 26))
@@ -813,7 +1327,7 @@ class HundredWindow(QWidget):
         p.setBrush(QColor(255, 206, 120))
         p.drawRoundedRect(QRectF(24, by, bw * (min(self.floor, TARGET_FLOOR) / float(TARGET_FLOOR)), 5.0), 2, 2)
         if self.msg_t > 0.0:
-            p.setFont(QFont("Microsoft YaHei", 12))
+            p.setFont(_f(12))
             p.setPen(QPen(QColor(255, 226, 170)))
             p.drawText(QRectF(0, 88, VW, 26), Qt.AlignCenter, self.msg)
 
@@ -823,26 +1337,33 @@ class HundredWindow(QWidget):
         p.drawRect(QRectF(0, 0, VW, VH))
 
         def big(s, size, y, col):
-            p.setFont(QFont("Microsoft YaHei", size, QFont.Bold))
+            p.setFont(_f(size, bold=True))
             p.setPen(QPen(QColor(*col)))
             p.drawText(QRectF(0, y, VW, size + 20), Qt.AlignCenter, s)
 
         if self.phase == "title":
-            big("是男人就下一百层", 44, 210, (255, 226, 170))
-            p.setFont(QFont("Microsoft YaHei", 14))
+            big("是露娜就下一百层", 44, 200, (255, 226, 170))
+            p.setFont(_f(14))
             p.setPen(QPen(QColor(206, 210, 228)))
-            p.drawText(QRectF(0, 286, VW, 26), Qt.AlignCenter,
+            p.drawText(QRectF(0, 276, VW, 26), Qt.AlignCenter,
                        "往下掉一百层。掉到下一层的平台上，就算过一层。")
-            p.drawText(QRectF(0, 322, VW, 26), Qt.AlignCenter,
+            p.drawText(QRectF(0, 312, VW, 26), Qt.AlignCenter,
                        "平台一层比一层窄，站的地方越来越少。")
-            p.drawText(QRectF(0, 358, VW, 26), Qt.AlignCenter,
+            p.drawText(QRectF(0, 348, VW, 26), Qt.AlignCenter,
                        "掉下去的时候还能按一次跳救自己 —— 但只有一次。")
-            p.setPen(QPen(QColor(150, 156, 180)))
-            p.drawText(QRectF(0, 410, VW, 24), Qt.AlignCenter,
-                       "← → 移动　空格 跳　·　R 重开　·　Esc 退出")
+            p.setPen(QPen(QColor(255, 214, 150)))
+            p.drawText(QRectF(0, 384, VW, 26), Qt.AlignCenter,
+                       "每 10 层有个落脚点：摔不死，在那儿能买东西。")
+            p.setPen(QPen(QColor(178, 184, 208)))
+            p.drawText(QRectF(0, 428, VW, 24), Qt.AlignCenter,
+                       "← → 移动　空格 跳　E 买东西　·　R 重开　·　Esc 退出")
+            p.setFont(_f(12))
+            p.setPen(QPen(QColor(120, 126, 150)))
+            p.drawText(QRectF(0, 462, VW, 22), Qt.AlignCenter,
+                       "深处有横板、齿轮、灯 —— 每层要看的东西不一样。")
         elif self.phase == "dead":
             big("摔了", 52, 196, (240, 150, 140))
-            p.setFont(QFont("Microsoft YaHei", 15))
+            p.setFont(_f(15))
             p.setPen(QPen(QColor(226, 216, 196)))
             p.drawText(QRectF(0, 282, VW, 26), Qt.AlignCenter,
                        "下到第 %d 层　（最好 %d 层）" % (min(self.floor, TARGET_FLOOR), self.best))
@@ -851,7 +1372,7 @@ class HundredWindow(QWidget):
                 p.drawText(QRectF(0, 336, VW, 24), Qt.AlignCenter, "空格 / 点击 重来")
         elif self.phase == "win":
             big("100 层", 58, 186, (255, 226, 170))
-            p.setFont(QFont("Microsoft YaHei", 15))
+            p.setFont(_f(15))
             p.setPen(QPen(QColor(226, 216, 196)))
             p.drawText(QRectF(0, 276, VW, 26), Qt.AlignCenter, "你下到底了。")
             if self.win_t > 0.8:

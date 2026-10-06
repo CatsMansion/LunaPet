@@ -97,11 +97,25 @@ print("=" * 78)
 print("② 难度曲线：平台越往下越窄")
 print("=" * 78)
 ws = [H.plat_width(f) for f in range(1, 101)]
-chk("第 1 层最宽", ws[0] == max(ws), "f1=%.0f" % ws[0])
-chk("第 100 层最窄", ws[-1] == min(ws), "f100=%.0f" % ws[-1])
-chk("单调不增", all(ws[i] >= ws[i + 1] for i in range(99)), "")
-chk("最窄层仍宽于身体 3 倍（留容错）", ws[-1] > H.BODY_W * 3,
-    "f100=%.0f  body=%.0f" % (ws[-1], H.BODY_W))
+# ⭐⭐ v5 更正：这条判据原本是「宽度全局单调不增」。
+# ⛔ v5 加了落脚点（每 10 层加宽 LANDING_BONUS_W）⇒ 全局单调**必然不成立**，
+#   而且**不应该**成立 —— 落脚点就是宽的，那是它的识别特征。
+# ✅ 正确的问法（别问"数是不是单调"，问"难度是不是随深度上升"）：
+#     只看**普通层**（非落脚点）之间的单调性 + 落脚点确实比邻居宽。
+#⛔ 别为了保这条判据绿而去掉落脚点加宽 —— 那是拿机制迁就判据（判据问错问题）。
+_plain = [H.plat_width(f) for f in range(1, 101) if not H.is_landing(f)]
+chk("普通层宽度单调不增（难度随深度上升）",
+    all(_plain[i] >= _plain[i + 1] for i in range(len(_plain) - 1)), "")
+chk("⭐ 第 1 层是最宽的普通层", _plain[0] == max(_plain), "f1=%.0f" % _plain[0])
+chk("⭐ 落脚点确实比同深度普通层宽",
+    all(H.plat_width(f) > H.plat_width(f - 1) for f in range(10, 101, 10)),
+    "")
+chk("⭐ 落脚点层在画面内", not [
+    f for f in range(1, 101)
+    if H.plat_center(f) - H.plat_width(f) / 2 < 0
+    or H.plat_center(f) + H.plat_width(f) / 2 > H.VW], "")
+chk("最窄层仍宽于身体 3 倍（留容错）", min(ws) > H.BODY_W * 3,
+    "min=%.0f  body=%.0f" % (min(ws), H.BODY_W))
 chk("⭐ 100 层平台全在画面内（v4 前提）",
     not [f for f in range(1, 101)
          if H.plat_center(f) - H.plat_width(f) / 2 < 0

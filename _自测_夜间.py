@@ -26,7 +26,7 @@ from pet_engine import night as N
 
 pack = load_pack(os.path.join(HERE, "packs", "luna"))
 w = N.NightWindow(pack)
-w.start_night(1)               # ⭐ 2026-10-03 起初始是选档菜单，测试直接进「深夜」
+w.start_night(0)               # ⭐ 2026-10-03 起初始是选档菜单，测试直接进「深夜」
 
 # ---- 可控时钟 ----
 _T = [0.0]
@@ -251,9 +251,24 @@ print("=" * 72)
 #    靠"让它自己走过来"去撞视野会时灵时不灵（实测 alert 从 0.95 飘到 0.02）。
 #    → 手动钉死 mw.x / face / dir，并把 walk_t 拉长到不触发转身。
 def freeze_mw(x, face):
+    """把微波炉定在某个位置、朝某个方向，并**冻结它的待机计时**。
+
+    ⭐⭐ 2026-10-05 补`idle_t = IDLE_STIR_P`（设计端要求查清的那条）：
+      `Microwave._patrol` 现在**完全不平移 x**（Ronny「安静呆着」），
+      它只做一件事：`idle_t` 到点就 `face = -face` 转头（`IDLE_STIR_P = 9.0` 秒）。
+      ⛔ 旧版 freeze_mw 只设 walk_t/pause_t，**没管 idle_t** ⇒
+        它继承了上一轮 step_ai 剩下的计时（本例只剩 ~0.8 秒），
+        于是"背后听见"那组在**第 46~48 帧就转脸** ⇒ sense 0.25→1.00
+        ⇒ alert 瞬间涨满 ⇒ 报成「背后近距离听得见」FAIL。
+      ⇒ 这是**判据自己造了个转脸场景**，不是游戏行为变了。
+    ✅ 所以冻结必须连idle_t 一起重置到**满值**（9 秒），
+       保证 1 秒观测窗口内他不会转头。
+    """
     w.mw.x, w.mw.y = x, N.FLOOR_Y
     w.mw.face = w.mw.dir = face
     w.mw.walk_t, w.mw.pause_t = 999.0, 0.0
+    # ⭐ 站岗模式下一个周期= IDLE_STIR_P 秒；给满值 ⇒ 窗口内必不转头
+    w.mw.idle_t = float(N.IDLE_STIR_P)
 
 
 l.x, l.y = 200.0, N.FLOOR_Y
@@ -302,7 +317,7 @@ print()
 print("=" * 72)
 print("⑧ 偷东西 + 回窝结算")
 print("=" * 72)
-w.start_night(1)
+w.start_night(0)
 l = w.luna
 # ⭐⭐ 2026-10-04：容器分了四档，不再硬编码"三文鱼"——
 #   ⛔ 写死icon 会让"重排关卡数据"必然带崩这组测试（已踩过）。
@@ -337,7 +352,7 @@ chk("loot_log 记的是实际偷到的", w.loot_log == [exp0], f"{w.loot_log}")
 
 # ⭐ 惩罚要轻：已入库的绝不能被倒扣
 before = w.total_loot
-w.start_night(1)
+w.start_night(0)
 l = w.luna
 l.x, l.y = N.STASHES[0]["x"], N.STASHES[0]["y"]
 w._try_break()
@@ -351,7 +366,7 @@ print()
 print("=" * 72)
 print("⑨ 被抓 → YOU MEOWED → 押送回窝")
 print("=" * 72)
-w.start_night(1)
+w.start_night(0)
 l = w.luna
 l.x, l.y = 1000.0, N.FLOOR_Y
 w.mw.x, w.mw.y = 1000.0, N.FLOOR_Y
@@ -371,9 +386,14 @@ chk("总赃物没被倒扣", w.total_loot == before, f"{before} → {w.total_loo
 
 print()
 print("=" * 72)
-print("⑩ 三档配置 + 选档")
+print("⑩ 档位配置 + 选档")
 print("=" * 72)
-chk("三档齐备", len(N.NIGHTS) == 3, f"{[n['name'] for n in N.NIGHTS]}")
+# ⭐⭐ 2026-10-05 Ronny 20:42 拍板「三档都删，就只留最难那版」⇒ 判据从"三档齐备"改写。
+#   ⛔ **别只是把 3 改成 1** —— 那样以后有人加回档位，这条判据照样绿。
+#   ⭐ 所以连"name == 正午" 一起断言：档位数与档位名都被钉住。
+chk("单一档位（正午）",
+    len(N.NIGHTS) == 1 and N.NIGHTS[0]["name"] == "正午",
+    f"len={len(N.NIGHTS)} name={[n['name'] for n in N.NIGHTS]}")
 for i, cfg in enumerate(N.NIGHTS):
     w.start_night(i)
     mw, rm = w.mw, w.room
@@ -401,7 +421,7 @@ print()
 print("=" * 72)
 print("⑪ 旁白")
 print("=" * 72)
-w.start_night(1)
+w.start_night(0)
 l = w.luna
 n_steal = len(N.NARRATION["steal"])
 w._narr_seen.clear()
@@ -454,7 +474,7 @@ print()
 print("=" * 72)
 print("⑬ 爬梯动作（Ronny 2026-10-03 实机反馈：动作没装上）")
 print("=" * 72)
-w.start_night(1)
+w.start_night(0)
 l = w.luna
 l.x, l.y = float(LADX), FLOOR
 l.vx = l.vy = 0.0
@@ -514,7 +534,7 @@ print()
 print("=" * 72)
 print("\u2714 \u5668\u9f44 + \u566a\u58f0 + \u6f5c\u884c + \u722c\u68af\u5b89\u5168")
 print("=" * 72)
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 
 # ⭐⭐ 2026-10-04：容器分四档后，噪声测试**必须显式挑档**。
@@ -530,7 +550,7 @@ def _pick(w, kind):
 
 
 # ---------- ① jar：贴身敲 = 大声 ----------
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 _st = _pick(w, "jar")
 chk("本档有 jar 容器（噪声测试样本）", _st is not None, f"{_st}")
@@ -554,21 +574,29 @@ chk("frenzy 锁定的是【罐子的位置】不是露娜",
     f"fury_x={mw.fury_x} 罐子x={_st['x']} 露娜x={l.x:.0f}")
 
 # ---------- ② jar：远处敲 = 小声 ----------
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 _st = _pick(w, "jar")
 l.x, l.y = _st["x"], _st["y"]
-mw.x, mw.y = _st["x"] + 410.0, N.FLOOR_Y    # 距离 410px：听得见但弱很多
+mw.x, mw.y = _st["x"] + N.MW_HEAR_R * 0.85, N.FLOOR_Y  # ⭐ 0.85 半径处
+# ⭐⭐ 2026-10-05 判据两次更正：
+#   ① 原写死 410px，而 `MW_HEAR_R` 已从 420 收窄到 240 ⇒ 410px 落进"听不见"区
+#   ② 改成 0.5 半径（120px）⇒ k=0.465 仍属"很响" ⇒ alert 直接满
+#   ✅ 最终取 **0.85 半径（204px）**：k=0.172 < INVEST_ALERT(0.20) ⇒
+#      **听得见、alert 会涨、但不够他走过去看** —— 这才是「远处」这个命题本身。
+#      ⭐ 绑比例而不是绑像素：以后半径再调，这条依然在测同一个命题。
+#⭐ 实测表（jar 响度 0.62）：0.30R→k.564 / 0.50R→k.465 / 0.75R→k.271 /
+#        0.80R→k.223 / 0.85R→k.172（临界）/ 0.90R→k.118 / 1.00R→0
 mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
 w._try_break()
 far_alert = mw.alert
 chk("远处敲罐 = 声音小，但 alert 仍上升", 0.02 < far_alert < 0.30,
-    f"alert={far_alert:.2f}  dist=410px")
+    f"alert={far_alert:.2f}  dist={N.MW_HEAR_R*0.85:.0f}px(0.85R)")
 chk("距离越近噪声越大", far_alert < near_alert,
     f"{far_alert:.2f} < {near_alert:.2f}")
 
 # ---------- ③ loose：零噪声（2026-10-04 新增档位）----------
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 _st = _pick(w, "loose")
 chk("本档有 loose 容器（零噪声样本）", _st is not None, f"{_st}")
@@ -592,18 +620,18 @@ chk("⭐ 只有 jar 会引爆 frenzy",
     f"{[k for k in N.KIND_ORDER if N.KIND_TABLE[k]['fury']]}")
 
 # 超出听觉半径 = 完全听不见
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 _st = w.room.stashes[2]
 l.x, l.y = _st["x"], _st["y"]
-mw.x, mw.y = _st["x"] + 460.0, N.FLOOR_Y
+mw.x, mw.y = _st["x"] + N.MW_HEAR_R * 1.15, N.FLOOR_Y
 mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
 w._try_break()
 chk("超出听觉半径就完全听不见", mw.alert < 0.001,
-    f"alert={mw.alert:.3f}  dist=460px  半径={N.MW_HEAR_R:.0f}")
+    f"alert={mw.alert:.3f}  dist={N.MW_HEAR_R*1.15:.0f}px(1.15R)  半径={N.MW_HEAR_R:.0f}")
 
 # ---- 累f积f而c不d是f一0敲2满1：a敲2三9下b才d快b进b追d踪a ----
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 l.x, l.y = 690.0, COUNTER
 mw.x, mw.y = float(LADX), FLOOR
@@ -620,41 +648,67 @@ step_ai(1 / 60, 3)   # 让 update 跑一下，state 才会更新   # ⛔ 用 ste
 chk("\u8d34\u8eab敲\u4e24\u4e0b\u5c31\u8fdb chase\uff08不是\u4e00\u6572\u6ee1\uff09", mw.state == "chase",
     f"alerts={[round(a,2) for a in alerts]} state={mw.state}")
 
-# 远处敲：弱很多，敲完一整层也不该靠累积锁定
-# ⭐⭐ 2026-10-04 改判据（容器分四档 + investigate 之后，这条断言的**前提整个变了**）：
-#   旧写法断言「逐个敲光全部容器 → 累积到 chase」。那在"所有容器噪声都是 0.62"的
-#   旧设计下成立（五次叠到 3.1）。四档分化后（loose 0 / plate 0.26 / jar 0.62）
-#   本档理论上限只有 0.552，**永远到不了 1.0** —— 旧断言是拿旧数据套新代码。
+# ⬴⬴ 2026-10-05 判换改写（设计端采方案 A）——旧断言「不靠累积」名不岞实
 #
-#   ⛔ 但改判据前必须先回答"这是 bug 还是新设计的必然"（2026-10-04 实测算过）：
-#     守卫在 x=1050 时逐个敲的实测累计 = [0.00, 0.14, 0.31, 0.55, 0.55]。
-#     0.55 是**数学上限**而非"衰减吃掉了"—— 说明"敲光一整层不足以引 him 锁定"
-#     是四档设计的必然结果，不是漏配。
-#     再加上 ALERT_DECAY=0.8/秒 + "一次只能拿一件"（每趟回窝 3~4 秒），
-#     跨容器的 alert 累积在**真实玩法里根本不可达**（峰值从没超过 0.25）。
-#   ✅ 所以噪声机制换了一条兑现路径：**investigate（走过去查看）**，见下面新增那组。
-#   ⛔ 别再把"累积到 chase"当噪声机制的验收标准，除非先改KIND_TABLE 的数值设计。
-w.start_night(1)
-l, mw = w.luna, w.mw
-mw.x, mw.y = 1050.0, N.FLOOR_Y
-mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
-mw.invest_x, mw.invest_linger, mw.invest_hold = None, 0.0, 0.0
-far_alerts = []
-for k in range(len(w.room.stashes)):
-    if not w.room.stashes[k]["broken"]:
-        l.x, l.y = w.room.stashes[k]["x"], w.room.stashes[k]["y"]
-        w._try_break()
-    far_alerts.append(mw.alert)
+# 旧断言写的是「敲光一整层不靠累积触发 chase」。
+# ⬴ 它已经不成立，且不是因为旧档位参数，而是**机制本身**：
+#   逐击实测（微波父在 x=1050，逐个敲容器）：
+#     敲#1 x=450 loose : 0.000 → 0.000d=600 超听圈
+#     敲#2 x=680 plate : 0.000 → 0.000   d=370 超听圈
+#     敲#3 x=800 plate : 0.000 → 0.000   d=250 超听圈
+#     敲#4 x=900 jar   : 0.000 → **1.000**  ← 单击到顶！d=150
+#   → 前三击全是 0（距离 250~600px 均在听圈外），
+#     **第 4 击单独把 alert 从 0 推到 1.0** —— 与「累积」无关。
+#
+# ⬴ 真机制（night.py go_fury）：
+#   jar 的 noise=0.62，d=150 → hear_strength = 0.378
+#   ⇒ go_fury 的阈值 `if heard < 0.30: return False` 被越过 ⇒ **进 frenzy**
+#   ⇒ fury=True 使alert 立刻涨满（`_take_stash` 的 fury 分支）
+#   ⇒ 这就是「破罐即引爆」的设计，**不是 bug**（阈值 0.30 是现行值）。
+#
+# ⬴ 为什么重写成「单击」的判换（设计端采A）：
+#   它才能真正守住 `go_fury` 的 172px 阈值；
+#   老判换把微波父摆到听圈外、朘而避开了 frenzy 分支——
+#   那样最容易出 bug 的那一块就没人测了。
+_jar = [s for s in w.room.stashes if s["kind"] == "jar"][0]
+
+
+def _jar_try(mw_dx):
+    """把微波炉摆到 jar 右侧 mw_dx px 处，敲一下，返回 (heard, alert, fury, state)。"""
+    w.start_night(0)
+    l, mw = w.luna, w.mw
+    l.x, l.y = _jar["x"], _jar["y"]
     l.carrying = []
-step_ai(1 / 60, 3)
-# ✅ ① 正确预期：敲光非 frenzy 容器**不会**触发 chase（这是设计，不是 bug）
-chk("敲光一整层不靠累积触发 chase（四档噪声上限 < 1.0）",
-    mw.state != "chase" and mw.alert < 1.0,
-    f"far_alerts={[round(a, 2) for a in far_alerts]} state={mw.state} alert={mw.alert:.3f}")
-# ✅ ② 但逐个靠近确实单调不减（噪声机制没坏，只是上限变了）
-_inc = all(b >= a - 1e-9 for a, b in zip(far_alerts, far_alerts[1:]))
-chk("逐个靠近时 alert 单调不减（越近越响）", _inc,
-    f"{[round(a, 2) for a in far_alerts]}")
+    mw.x, mw.y = _jar["x"] + mw_dx, N.FLOOR_Y
+    mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
+    mw.invest_x, mw.invest_linger, mw.invest_hold = None, 0.0, 0.0
+    mw.fury, mw.fury_t, mw.fury_x = False, 0.0, None
+    _heard = mw.hear_strength(_jar["x"], _jar["noise"])
+    w._try_break()
+    return _heard, mw.alert, mw.fury, mw.state
+
+
+# ⬴ 阳性：jar 在听圈内（d=150，heard=0.378 >= 0.30）⇒ 单击直接 frenzy
+_h, _a, _f, _s = _jar_try(150.0)
+chk("单个 jar 在听圈内 ⇒ 直接 frenzy（不靠多击累积）",
+    _f is True and _a >= 1.0 and _s == "chase",
+    f"d=150 heard={_h:.3f} alert={_a:.3f} fury={_f} state={_s}")
+chk("  ⇒ 那一击的 heard 确实越过 go_fury 阈值 0.30", _h >= 0.30,
+    f"heard={_h:.3f} >= 0.30（阈值在 night.py go_fury）")
+
+# ⬴ 阳性对照（这是本条判据的关键）：同一个 jar 放到 >200px 位岔 alarm **不进 frenzy**
+_h2, _a2, _f2, _s2 = _jar_try(220.0)
+chk("阴性对照同一 jar 在 200px 外 ⇒ **不**进 frenzy（不涨满）",
+    _f2 is False and _a2 < 1.0,
+    f"d=220 heard={_h2:.3f} alert={_a2:.3f} fury={_f2} state={_s2}")
+chk("  ⇒ 阴性对照的 heard 确实低于阈值（否则上一条没意义）",
+    _h2 < 0.30, f"heard={_h2:.3f} < 0.30")
+# ⬴ 阈值不是“一切就进”：扫一下真实边界，把 172px 的文档化成判据
+_edge = [(d, _jar_try(float(d))[1:]) for d in (172, 180)]
+chk("  · 阈值边界在 172~180px 之间（172 进 / 180 不进）",
+    _edge[0][1][1] is True and _edge[1][1][1] is False,
+    " / ".join(f"d={d}: fury={a[1]}" for d, a in _edge)
+    + "⇒ 与 go_fury 阈值 0.30 对应的 172px 一致")
 
 # ============================================================================
 # ⭐⭐ investigate（走过去查看声源）—— Ronny 2026-10-04 拍板「方向二」
@@ -675,36 +729,128 @@ def _reset_inv():
     mw.invest_x, mw.invest_linger, mw.invest_hold = None, 0.0, 0.0
 
 
-# ---------- ① 贴脸敲 plate → 他真的走过去看 ----------
-w.start_night(1)
-l, mw = w.luna, w.mw
-_st = _pick(w, "plate")
-chk("本档有 plate 容器（investigate 样本）", _st is not None, f"{_st}")
-l.x, l.y = _st["x"], _st["y"]
-l.carrying = []
-mw.x, mw.y = _st["x"] - 60.0, N.FLOOR_Y
-mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
-_reset_inv()
-w._try_break()
-chk("⭐ 够响的声响登记了触发记忆（invest_hold > 0）",
-    mw.invest_hold > 0.0, f"hold={mw.invest_hold:.2f}")
-_x0 = mw.x
-for _ in range(20):                # 最多走 10 秒，中途被 chase 就停
-    step_ai(1 / 60, 30)
-    if mw.state == "chase":
-        break
-chk("⭐ 他离开巡逻位走向声源", abs(mw.x - _x0) > 40.0,
-    f"位移 {abs(mw.x - _x0):.0f}px  { _x0:.0f} -> {mw.x:.0f}")
-chk("走到声源附近停住", abs(mw.x - _st["x"]) < 70.0,
-    f"偏差 {abs(mw.x - _st['x']):.0f}px（声源 x={_st['x']}）")
-chk("查看是一次性的：看完回巡逻，不是追着人跑",
-    mw.invest_x is None and mw.state != "chase",
-    f"state={mw.state} invest_x={mw.invest_x}")
-chk("环顾计时无负值残留（只清 invest_x 会留脏状态）",
-    mw.invest_linger >= 0.0, f"linger={mw.invest_linger:.3f}")
+# ==================================================================
+# ⭐⭐⭐ 2026-10-06 PR-07：investigate 三条判据**整条重写**（原写法是假绿）
+#
+# ⛔⛔ 原写法错在哪（两条独立原因叠加，缺一不可）：
+#   ① **真 bug**：`_investigate` 把「查看完回站岗点」写在**移动分支的末尾**，
+#      每走一帧就把 `invest_x` 改写成 `idle_home`；而 `tgt` 是函数开头读的
+#      ⇒ 下一帧目标已经是站岗点，**他永远朝站岗点走、从不去看声源**。
+#      而原判据把 plate 摆在 680、mw 在 620，他要去的方向（934）**刚好路过** 680，
+#      于是「⭐ 他走过来过」被判成OK —— **一条假绿**（实测修bug 前离声源最近 117.2px）。
+#   ② **布置问题**：露娜全程站在容器上（mw 右边 60px、正面）⇒ sense=1.0，
+#      加上 plate 那0.256，第 **19** 帧就进 chase；chase 压过 investigate
+#      （设计不变量③）⇒ 「他离开原位置」「回站岗」「一次性」三条一起红。
+#
+# ✅ 现在的判据只问**机制量**，不问"某个会飘的时间窗口末端"：
+#     离声源最近距离（≤ INVEST_RADIUS  才算真的走过去）
+#     是否环顾过（invest_linger 峰值 > 0）
+#     看完是否回到站岗点（|终x − idle_home| ≤ INVEST_RADIUS）
+#   并加**成对阳性对照**：同一个声源，只改`idle_home` ⇒ 两条行为必须不同。
+#     （这条对照是为了防"修完还是假绿"：pre-fix 两种布置他都不去看声源。）
+# ==================================================================
+
+
+def _inv_probe(mw_dx=100.0, home_dx=None, seconds=10.0):
+    """敲一下 plate（真实入口 `_try_break`），然后让露娜跑开，记录 investigate 行为。
+
+    `mw_dx`  = 微波炉摆在声源右侧多少 px（⇒ 决定这声响**够不够**触发查看）
+    `home_dx` = 若给，则把站岗点强行挪到「声源 + home_dx」（⇒ 阳性对照用）
+
+    返回 dict：离声源最近距离 / 是否环顾过 / 是否进过 chase / 终x / 站岗点 / 声源。
+    ⭐ 露娜在敲完之后**必须离开**——不然她贴脸站着会进 chase，
+      把「他走过去看」这件事顶掉（那就是原判据踩的坑）。
+    ⚠️ 声源坐标必须在 `start_night` **之后**从新room 里取：
+      上一轮probe 已经把上一局的容器敲破了，沿用旧坐标会拿到**另一件容器**，
+      于是 mw_dx / home_dx 全部对错位置（第一版就是这么错的，②a/②b 全红）。
+    """
+    w.start_night(0)
+    l, mw = w.luna, w.mw
+    st = _pick(w, "plate")
+    mw.x, mw.y = float(st["x"]) + mw_dx, N.FLOOR_Y
+    if home_dx is not None:
+        mw.idle_home = float(st["x"]) + home_dx
+    mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
+    mw.invest_x, mw.invest_linger, mw.invest_hold = None, 0.0, 0.0
+    l.x, l.y = st["x"], st["y"]
+    l.carrying = []
+    w._try_break()                      # ⭐ 真实入口：会登记 invest_hold / hear_x
+    out = dict(snd=float(st["x"]), home=float(mw.idle_home),
+               hold=mw.invest_hold, min_d=1e9, linger=0.0, chase=False,
+               x0=float(mw.x), x1=float(mw.x))
+    l.x, l.y = 150.0, N.FLOOR_Y# ⭐ 敲完就跑（模拟玩法）
+    for _ in range(int(seconds * 60)):
+        step_ai(1 / 60, 1)
+        out["min_d"] = min(out["min_d"], abs(mw.x - st["x"]))
+        out["linger"] = max(out["linger"], mw.invest_linger)
+        if mw.state == "chase":
+            out["chase"] = True
+    out["x1"] = float(mw.x)
+    out["invest_x"] = mw.invest_x
+    return out
+
+
+# ---------- ① 布置(a)：声源离站岗点远 ⇒ 他必须真的走过去、环顾、再回来 ----------
+_a = _inv_probe(mw_dx=100.0)
+chk("①a 布置：声源离站岗点足够远（防'路过就算'）",
+    abs(_a["snd"] - _a["home"]) > 150.0,
+    f"声源 x={_a['snd']:.0f}  站岗点={_a['home']:.0f}  相距 "
+    f"{abs(_a['snd']-_a['home']):.0f}px")
+chk("①b 够响的声响登记了触发记忆（invest_hold > 0）",
+    _a["hold"] > 0.0, f"hold={_a['hold']:.2f}")
+chk("①c ⭐ 从未被 chase 顶掉（前置条件：他是因为'走过去看'才动的）",
+    not _a["chase"], f"chase={_a['chase']}")
+chk("①d ⭐⭐ 他**真的走到了声源**（离声源最近 ≤ INVEST_RADIUS）",
+    _a["min_d"] <= N.INVEST_RADIUS,
+    f"离声源最近 {_a['min_d']:.1f}px  门槛 {N.INVEST_RADIUS:.0f}px"
+    f"（修 bug 前实测是 117.2px）")
+chk("①e ⭐ 到达后确实环顾了（invest_linger 峰值 > 0）",
+    _a["linger"] > 0.0, f"峰值 {_a['linger']:.3f}s（INVEST_LINGER={N.INVEST_LINGER}）")
+chk("①f ⭐ 看完回到站岗点（|终x − idle_home| ≤ INVEST_RADIUS）",
+    abs(_a["x1"] - _a["home"]) <= N.INVEST_RADIUS,
+    f"终x={_a['x1']:.1f}  站岗点={_a['home']:.0f}  偏差 "
+    f"{abs(_a['x1']-_a['home']):.1f}px")
+chk("①g 他离开原位置（净位移 > 40px）", abs(_a["x1"] - _a["x0"]) > 40.0,
+    f"位移 {abs(_a['x1']-_a['x0']):.0f}px  {_a['x0']:.0f} -> {_a['x1']:.0f}")
+chk("①h 查看是一次性的：结束时不追着人跑",
+    _a["invest_x"] is None,
+    f"invest_x={_a['invest_x']}  chase={_a['chase']}")
+chk("①i 环顾计时无负值残留（只清invest_x 会留脏状态）",
+    _a["linger"] >= 0.0, f"峰值 {_a['linger']:.3f}")
+
+# ---------- ② ⭐ 成对阳性对照：同一个声源，只改 idle_home ⇒ 行为必须不同 ----------
+#Pre-fix 两种布置他都**不去**看声源（只是路过），所以这条对照当时也拦不住假绿；
+#   修好之后，(a) 的终点在声源远处（回了自己的站岗点），(b) 的终点贴着声源
+#   （站岗点就在声源旁边）⇒ 两个终点的"离声源距离"必须拉开。
+_b = _inv_probe(mw_dx=100.0, home_dx=10.0)
+chk("②a 对照布置：站岗点就在声源旁边（10px）",
+    abs(_b["home"] - _b["snd"]) <= 15.0,
+    f"声源 x={_b['snd']:.0f}  站岗点={_b['home']:.0f}")
+chk("②b ⭐ 对照布置下他同样走到了声源并环顾",
+    _b["min_d"] <= N.INVEST_RADIUS and _b["linger"] > 0.0,
+    f"离声源最近 {_b['min_d']:.1f}px  环顾峰值 {_b['linger']:.3f}s")
+_da = abs(_a["x1"] - _a["snd"])
+_db = abs(_b["x1"] - _b["snd"])
+chk("②c ⭐⭐ 阳性对照：两种布置的**终点离声源距离**必须不同"
+    "（防'又是同一种假绿'）",
+    abs(_da - _db) > 100.0,
+    f"(a) 终点离声源 {_da:.0f}px（他回了自己站岗点）  "
+    f"(b) 终点离声源 {_db:.0f}px（站岗点就在声源旁）  差 {abs(_da-_db):.0f}px")
+chk("②d 两种布置下他都真的走到了声源（这一条不能靠布置取巧）",
+    _a["min_d"] <= N.INVEST_RADIUS and _b["min_d"] <= N.INVEST_RADIUS,
+    f"(a) {_a['min_d']:.1f}px   (b) {_b['min_d']:.1f}px")
+
+# ---------- ③ 阴性对照：不够门槛的声响 ⇒ 他一步都不许动 ----------
+_c = _inv_probe(mw_dx=200.0)
+chk("③a ⭐ 阴性对照：200px 外的 plate 不登记触发记忆",
+    _c["hold"] == 0.0, f"hold={_c['hold']:.2f}  离声源 {_c['min_d']:.0f}px")
+chk("③b 阴性对照下他一步都没动（不是'走了一点'）",
+    abs(_c["x1"] - _c["x0"]) < 1.0 and _c["min_d"] > 100.0,
+    f"位移 {abs(_c['x1']-_c['x0']):.2f}px  离声源最近 {_c['min_d']:.0f}px")
+chk("③c 阴性对照下没有环顾", _c["linger"] == 0.0, f"环顾峰值 {_c['linger']:.3f}s")
 
 # ---------- ② 远距离敲 plate → 不启动查看（位置仍是战术资源）----------
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 _st2 = _pick(w, "plate")
 l.x, l.y = _st2["x"], _st2["y"]
@@ -724,12 +870,23 @@ chk("不变量①investigate 速度 < RUN_SPEED（他是在查看不是追杀）
     N.INVEST_SPEED < N.RUN_SPEED - 8.0,
     f"{N.INVEST_SPEED:.0f} < {N.RUN_SPEED - 8.0:.0f}")
 
-_LO = mw.w * 0.5 + 8.0
-_HI = N.VW - mw.w * 0.5 - 8.0
+# ⭐⭐ 2026-10-06 PR-07：这条判据的**上界 previously 是错的**，一并纠正。
+#   ⛔ 旧写法 `_HI = N.VW - mw.w*0.5 - 8.0` = 1280−56 = **1224**，
+#      那是**视口宽**口径 —— PR-03 已把世界宽改成 3840，
+#      而 `_clamp_self_x` / `_clamp_target_x` 早就改成读 `self.world_w`
+#      （那两处的docstring 里写着"原来是视口宽，这三处同一天被漏改过两次"）。
+#      ⇒ 判据的 1224 与被测代码的真实活动区 **[56, 3784]** 不一致。
+#   ⚠️ 它以前一直"绿"是**假绿**：pre-fix 时 `invest_x` 在一帧内就被改写成
+#      `idle_home`(934)，`_tgt` 读到的永远是 934 ⇒ 恰好落在 1224 以内。
+#      修完 bug 后 `_tgt` 才真的是被夹过的声源坐标（hx=1275 → 1275）⇒ 报红。
+#   ✅ 现在改成**不写死任何宽度**：直接问"目标是不是等于 `_clamp_target_x(hear_x)`"
+#      + "他的x 全程有没有越出 `[half, world_w−half]`"（逐帧量全程 min/max）。
+#      ⇒ 判据比旧版**更强**（旧版只看终帧一个点），且不会再次与世界宽脱钩。
+_HALF = mw.w * 0.5 + 8.0
 _edge_ok = True
 _edge_info = []
-for _hx in (5.0, 1275.0, 640.0):         # 左右边界外 + 房中央
-    w.start_night(1)
+for _hx in (5.0, 1275.0, 640.0, 3800.0):    # 左外 / 右外 / 房中央 / 远超世界右界
+    w.start_night(0)
     l, mw = w.luna, w.mw
     mw.alert, mw.state = 0.0, "patrol"
     mw.hear_x = _hx
@@ -738,16 +895,24 @@ for _hx in (5.0, 1275.0, 640.0):         # 左右边界外 + 房中央
     mw.invest_hold = 99.0                   # 强制启动
     step_ai(1 / 60, 1)
     _tgt = mw.invest_x
-    step_ai(1 / 60, 200)
-    _inside = (_LO - 1.0) <= mw.x <= (_HI + 1.0)
-    _edge_ok = _edge_ok and (_tgt is not None
-                             and _LO - 1.0 <= _tgt <= _HI + 1.0 and _inside)
-    _edge_info.append(f"hx={_tgt}→x={mw.x:.0f}")
-chk("不变量② 目标夹进可活动区，他不会走出房间", _edge_ok,
-    f"界=[{_LO:.0f},{_HI:.0f}]  " + " ".join(_edge_info))
+    _want = mw._clamp_target_x(_hx)         # ⭐ 不再手写公式
+    _ok_t = (_tgt is not None and abs(_tgt - _want) < 1e-6
+             and _HALF - 1.0 <= _tgt <= mw.world_w - _HALF + 1.0)
+    _minx, _maxx = 1e9, -1e9
+    for _ in range(200):
+        step_ai(1 / 60, 1)
+        _minx = min(_minx, mw.x)
+        _maxx = max(_maxx, mw.x)
+    _ok_x = (_minx >= _HALF - 1.0) and (_maxx <= mw.world_w - _HALF + 1.0)
+    _edge_ok = _edge_ok and _ok_t and _ok_x
+    _edge_info.append(f"hx={_hx}→tgt={_tgt}={_want}{'' if _ok_t else '✗目标'}"
+                      f" x∈[{_minx:.0f},{_maxx:.0f}]{'' if _ok_x else ' ✗越界'}")
+chk("不变量② 目标夹进可活动区，他不会走出房间（逐帧量全程）", _edge_ok,
+    f"活动区=[{_HALF:.0f},{mw.world_w-_HALF:.0f}]（world_w={mw.world_w:.0f}，"
+    f"旧判据错用视口宽 ⇒ 上界只有 1224）  " + " ".join(_edge_info))
 
 # chase 压过 investigate
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 mw.alert, mw.state = 0.0, "patrol"
 mw.hear_x = 1100.0
@@ -768,7 +933,7 @@ chk("不变量③ chase 立刻压过 investigate（发现你就只追你）",
 
 
 # ---- 潜c行c：a按9 Shift 变8慢2且4换2成0 walk动8作c ----
-w.start_night(1)
+w.start_night(0)
 l = w.luna
 l.x, l.y = 300.0, N.FLOOR_Y
 l.vx = l.vy = 0.0
@@ -796,7 +961,7 @@ chk("\u5e38\u901f\u65f6\u7528 human_run", l.act == "human_run", f"act={l.act}")
 w.keys = set()
 
 # ---- 爬c梯f子0 = 完c全8安9全8（8Lode Runner 机a制6）9 ----
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 l.x, l.y = float(LADX), 510.0                  # 爬c梯f中d段5（⛔ 别放 520：断言是 y<520 严格小于，放 520 必挂）
 l.vx = l.vy = 0.0
@@ -822,7 +987,7 @@ chk("\u4e0b\u6765\u540e\u6062\u590d\u88ab\u89c1\u8ff7\u7684\u53ef\u80fd", mw.ale
     f"alert={mw.alert:.2f}")
 
 # ---- 画b面2能d画b（8容9器8/碎e片7/潜c行c）9 ----
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 l.x, l.y = 690.0, COUNTER
 l.sneak = True
@@ -839,7 +1004,7 @@ print()
 print("=" * 72)
 print("\u2714 \u5fae\u6ce2\u7089\u4f53\u578b / \u722c\u68af / \u8df3\u8dc3\uff08Ronny 10-03\uff1a\u4e0a\u5f3a\u5ea6\uff09")
 print("=" * 72)
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 chk("\u5fae\u6ce2\u7089\u6bd4\u9732\u5a1c\u9ad8\uff08183cm vs 150cm\uff09", mw.body_h > N.ACTOR_H,
     f"mw {mw.body_h:.0f}px  vs  \u9732\u5a1c {N.ACTOR_H:.0f}px")
@@ -891,7 +1056,7 @@ print("=" * 72)
 #   于是报 x=580 FAIL。判据不是被产品代码拦的，是它自己站错了起点。
 #   ✅ 起点改成 TABLE_X0 - 80（布区外 80px），跑 0.5s 撞墙，期望被钉在 TABLE_X0 - m。
 #   ⛔ 真实厨房里也不可能"从桌布里面走出来" —— 那里是桌子底下，只能从桌面下。
-w.start_night(1)
+w.start_night(0)
 l = w.luna
 l.x, l.y = N.TABLE_X0 - 80.0, N.FLOOR_Y
 l.vx, l.vy = N.RUN_SPEED, 0.0
@@ -924,7 +1089,7 @@ chk("爬布到底落在地板上（不在地板下方）", abs(l.y - N.FLOOR_Y) 
     f"y={l.y:.1f} 期望 {N.FLOOR_Y}")
 
 # ④ QTE 锁移动：QTE 期间方向键只喂 QTE，不驱动移动
-w.start_night(1)
+w.start_night(0)
 l = w.luna
 l.x, l.y = 610.0, N.TABLE_TOP          # 站在桌面冰箱前
 l.vx = l.vy = 0.0
@@ -952,7 +1117,7 @@ print()
 print("=" * 72)
 print("\u2714 \u5fae\u6ce2\u7089\u4f53\u578b / \u722c\u68af / \u8df3\u8dc3\uff08Ronny 10-03\uff1a\u4e0a\u5f3a\u5ea6\uff09")
 print("=" * 72)
-w.start_night(1)
+w.start_night(0)
 l, mw = w.luna, w.mw
 chk("\u5fae\u6ce2\u7089\u6bd4\u9732\u5a1c\u9ad8\uff08183cm vs 150cm\uff09", mw.body_h > N.ACTOR_H,
     f"mw {mw.body_h:.0f}px  vs  \u9732\u5a1c {N.ACTOR_H:.0f}px")

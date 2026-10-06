@@ -120,11 +120,11 @@ class GameEntry:
 # ⛔ 顺序 = 显示顺序，第一个默认选中。
 GAMES = [
     GameEntry(
-        "hundred", "是男人就下一百层",
+        "hundred", "是露娜就下一百层",
         "往下掉一百层。左右键调落点，平台只会越来越窄。",
         "hundred", "HundredWindow",
         available=True, badge="新",
-        keys="← → 移动　空格 跳　R 重开",
+        keys="← → 移动　空格 跳　E 买东西　R 重开",
     ),
     GameEntry(
         "night", "深夜厨房",

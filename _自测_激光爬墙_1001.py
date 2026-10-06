@@ -17,11 +17,18 @@ from core import load_pack, Pet
 PACK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs", "luna")
 SCR = (0, 0, 1920, 1080)
 ok = 0
+# ⛔ 2026-10-05 程序端补：原来只累加 ok，**失败项被静默丢弃**——
+#   没有失败计数、没有清单、也没有 sys.exit ⇒ 挂2 项失败时，
+#   尾行照样打印「通过 12 组检查」，看起来一切正常（判据失效 ⇒ 假绿）。
+#   ⭐ 这正是 _自测_core.py 当年栽过的同一个坑（写死的 8 被误读成"8 失败"）的变体。
+BAD = []
 def check(label, cond, detail=""):
     global ok
     print(f"  {'✅' if cond else '⛔'} {label}" + (f"   {detail}" if detail else ""))
     if cond:
         ok += 1
+    else:
+        BAD.append(label)
 
 p = load_pack(PACK)
 
@@ -90,5 +97,10 @@ pet._has = lambda a: (a != "climb") and _orig_has(a)
 check("没有 climb 素材 → 不进入爬（返回 False）", pet._terrain_climb(0.016) is False)
 
 print("\n" + "=" * 54)
-print(f"  通过 {ok} 组检查")
+print(f"通过 {ok} / {ok + len(BAD)}")
+if BAD:
+    print("⛔ %d 项未过：%s" % (len(BAD), "、".join(BAD)))
 print("=" * 54)
+# ⛔ 补退出码：失败也要返回非 0，否则挂 CI / 批量脚本里根本发现不了。
+import sys as _sys
+_sys.exit(1 if BAD else 0)

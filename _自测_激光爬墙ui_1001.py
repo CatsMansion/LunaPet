@@ -22,11 +22,15 @@ from pet_engine.ui import PetWindow
 PACK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs", "luna")
 W, H = 3840.0, 2160.0
 ok = 0
+# ⛔ 2026-10-05 程序端补：原来只累加 ok，**失败项被静默丢弃**（详见同款 _自测_激光爬墙_1001.py）
+BAD = []
 def check(label, cond, detail=""):
     global ok
     print(f"  {'✅' if cond else '⛔'} {label}" + (f"   {detail}" if detail else ""))
     if cond:
         ok += 1
+    else:
+        BAD.append(label)
 
 w = PetWindow(load_pack(PACK))
 w.screen_rect = (0, 0, W, H)
@@ -155,5 +159,9 @@ check("贴边+低红点 → 走普通抓取路径（能起跳，未被墙模式�
       f"wall_mode={w._laser_wall_mode} state={pet.state} goal={pet.goal}")
 
 print("\n" + "=" * 56)
-print(f"  通过 {ok} 组检查")
+print(f"通过 {ok} / {ok + len(BAD)}")
+if BAD:
+    print("⛔ %d 项未过：%s" % (len(BAD), "、".join(BAD)))
 print("=" * 56)
+import sys as _sys
+_sys.exit(1 if BAD else 0)

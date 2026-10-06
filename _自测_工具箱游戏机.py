@@ -22,6 +22,13 @@ from core import load_pack
 import ui_toolbar as UT
 import night as N
 
+# ⭐ 2026-10-05：判据改验「游戏主界面」后需要 gamehub 的类型。
+#   ⛔ 但 gamehub 在函数内 import night / hundred，存在成环风险
+#   （ui → ui_toolbar → night → ui，见 ui_toolbar.py:127 的注释）。
+#   ⇒ 这里放在**模块顶层但在 ui_toolbar 之后**导入，与 ui_toolbar 自身的做法一致；
+#     若真成环，脚本会当场ImportError 而不是静默假绿（这是可接受的失败方式）。
+import gamehub as HUB
+
 pack = load_pack(os.path.join(HERE, "packs", "luna"))
 
 OK, BAD = [], []
@@ -83,15 +90,22 @@ chk("gamepad 槽位矩形在窗口内", r.bottom() <= UT.H_OPEN,
     f"槽位 y[{r.top()},{r.bottom()}] 窗口高 {UT.H_OPEN}")
 
 bar._open_entry("gamepad")
-nw = getattr(bar, "_night", None)
-chk("窗口已创建", nw is not None)
-chk("是 NightWindow", isinstance(nw, N.NightWindow) if nw else False,
-    f"type={type(nw).__name__ if nw else None}")
+# ⭐ 2026-10-05 程序端更新判据（⛔ 不是改绿，是接线语义变了：10-05 加了游戏主界面）
+#   旧断言：点 gamepad ⇒ bar._night 是 NightWindow。
+#   现实现：点 gamepad ⇒ 先开 **GameHubWindow**（游戏主界面），
+#           由主界面再仲裁到具体游戏窗口。⇒ 旧断言必然红，但**实现是对的**。
+#   ⇒ 判据改成守"新的不变式"：主界面起来、且不是直开 night。
+hw = getattr(bar, "_hub", None)
+chk("窗口已创建", hw is not None)
+chk("是游戏主界面 GameHubWindow", isinstance(hw, HUB.GameHubWindow) if hw else False,
+    f"type={type(hw).__name__ if hw else None}")
+chk("⛔ 不再直开 night（游戏选择归主界面仲裁）", getattr(bar, "_night", None) is None,
+    f"_night={getattr(bar, '_night', None)}")
 chk("工具栏进游戏时藏起来了", not bar.isVisible())
 
-first = nw
+first = hw
 bar._open_entry("gamepad")
-chk("重复点复用同一个窗口（不叠开）", getattr(bar, "_night", None) is first)
+chk("重复点复用同一个窗口（不叠开）", getattr(bar, "_hub", None) is first)
 
 print()
 print("=" * 72)
@@ -103,15 +117,34 @@ try:
 except Exception as e:
     chk("关闭不抛异常", False, f"{type(e).__name__}: {e}")
 app.processEvents()
-chk("_night 引用已清", getattr(bar, "_night", None) is None)
+chk("_hub 引用已清", getattr(bar, "_hub", None) is None)
 chk("工具栏恢复显示", bar.isVisible())
 
 # ⭐ 关掉之后再点一次：C++ 对象已析构，必须能重建而不是抛 RuntimeError
 try:
     bar._open_entry("gamepad")
-    chk("析构后能重建（不抛 RuntimeError）", getattr(bar, "_night", None) is not None)
+    chk("析构后能重建（不抛 RuntimeError）", getattr(bar, "_hub", None) is not None)
 except RuntimeError as e:
     chk("析构后能重建（不抛 RuntimeError）", False, f"{e}")
+
+#⭐⭐ 补一条**旧判据根本问不到**的不变式（10-05 接线变更新引入的风险点）：
+#   开了主界面**没进游戏**就退桌宠时，主界面必须一起收口，
+#   否则桌宠没了、主界面还飘在屏上 —— 看起来像程序卡住。
+#   ⛔ 这就是旧判据"只关_night 会漏"的那个坑，现已由 ui_toolbar.closeEvent 双收口修掉。
+bar3 = UT.ToolBar(_FakePet(pack))
+bar3._open_entry("gamepad")
+_hub3 = getattr(bar3, "_hub", None)
+_night3 = getattr(bar3, "_night", None)
+chk("复核用：主界面已开、且确实没进游戏", _hub3 is not None and _night3 is None,
+    f"_hub={_hub3 is not None} _night={_night3}")
+bar3.close()          # 触发工具箱 closeEvent
+app.processEvents()
+chk("⛔ 退出桌宠时主界面被一起收口（不留屏上幽灵窗口）",
+    getattr(bar3, "_hub", None) is None, f"_hub={getattr(bar3, '_hub', None)}")
+try:
+    del bar3
+except Exception:
+    pass
 
 print()
 print("=" * 72)
@@ -145,3 +178,5 @@ print(f"通过 {len(OK)} / {len(OK)+len(BAD)}")
 if BAD:
     print("未通过： " + "、".join(BAD))
 print("=" * 72)
+# ⛔ 2026-10-05 补退出码：原来失败也返回 0⇒ 挂CI / 批量脚本里发现不了。
+sys.exit(1 if BAD else 0)

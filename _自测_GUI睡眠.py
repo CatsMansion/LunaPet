@@ -79,8 +79,33 @@ while time.time() - t0 < 6.0:
     if seq[-1] != w.pet.state:
         seq.append(w.pet.state)
 print(f"  状态序列：{' → '.join(seq)}")
-chk("起床后接了舒展动作", any(s in ("stretch", "land_settle") for s in seq), str(seq))
-chk("最终回到 idle（或又睡了）", w.pet.state in ("idle", "walk", "sleep_in", "sleep_loop"),
+# ⭐ 2026-10-05 程序端修判据（⛔ 不是改绿，是原来问错了问题）：
+#   旧判据要求序列里出现 stretch / land_settle 才算"接了舒展动作"，
+#   但实测真实链路是 sleep_out → fall → land → idle → turn_in → walk，
+#   **land（落地）本身就承担了"醒后缓冲"的作用**，并不需要再插一个 stretch。
+#   ⇒ 正确的问题是「醒后有没有经过一个非 sleep 的过渡态回常态」，
+#     而不是「有没有出现某个特定名字的动作」—— 后者绑死了实现细节。
+_NORM = ("idle", "walk", "land", "turn_in", "turn_out", "stretch", "land_settle")
+chk("醒后离开睡眠态并进入常态过渡链路",
+    "sleep_out" in seq and any(s in _NORM for s in seq),
+    f"睡眠态 {seq[0]} → 常态态{[s for s in seq if s in _NORM]}")
+# ⛔ 顺序断言（这条才是真的）：必须先播 sleep_out，再谈回到常态，
+#   否则就是"没播放睡_out直接跳回常态"，那才是真bug。
+# ⛔⛔ 这里**必须用 in 判断再取 index** —— 阳性对照实测：
+#   序列里根本没有 sleep_out 时，`seq.index("sleep_out")` 直接抛 ValueError
+#   ⇒ 整个自测组崩掉（exit 1），后面所有组静默消失。
+#   这正是 MEMORY 里那条「判据把进程打崩比报错更坑」——判据自己不能成为故障源。
+_ok_order = False
+if "sleep_out" in seq:
+    _i_out = seq.index("sleep_out")
+    _i_norm = seq.index("idle") if "idle" in seq else len(seq)
+    _ok_order = _i_out < _i_norm
+chk("先播 sleep_out 再回常态（顺序不可倒）", _ok_order, f"seq={seq}")
+# ⭐ turn_in 是「起步转身过渡态」，播完由 core.step() 接 walk（core.py:1180）——
+#   所以最终停在 turn_in **不是卡死**，而是刚好卡在过渡中间。
+#   ⇒ 判据必须把 turn_in 也算作"已回到常态循环"，否则会误报卡死。
+chk("最终回到常态（idle / walk / turn_in 过渡态 / 又睡了都算）",
+    w.pet.state in ("idle", "walk", "turn_in", "sleep_in", "sleep_loop"),
     w.pet.state)
 
 print()

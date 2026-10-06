@@ -39,12 +39,100 @@ except ImportError:
     from core import load_pack
     from ui import silhouette_of
 
+# ============================================================================
+# 🎵 音频（PR-03 第三批）—— ⛔ **函数内延迟 import**，理由同core/ui
+#   ① `ui → ui_toolbar → night → audio` 会成环吗？—— 不会（audio 不import 我们），
+#      但 audio 要import PySide6.QtMultimedia，那是**打包 excludes里曾经有的一条**。
+#      放顶层 ⇒ 打包漏插件时整个游戏连窗口都开不出来（ModuleNotFoundError）。
+#   ② 放在函数内 ⇒ 最坏情况只是"没声音"，游戏照常跑（可降级）。
+#   ⛔ 因此 `LunaPet.spec` 的 hiddenimports 里必须点名 "audio"（同 night/gamehub）。
+# ============================================================================
+
+
+def _make_audio(parent=None):
+    """造一套音频。**绝不抛异常** —— 音频坏掉不该让游戏开不出窗口。"""
+    try:
+        import audio as _audio
+        return _audio.Audio(parent)
+    except Exception as e:                     # pragma: no cover
+        print(f"[夜间] ⛔ 音频引擎初始化失败（游戏继续，无声）: "
+              f"{type(e).__name__}: {e}")
+        return None
+
+
+def _is_day_level(cfg: dict) -> bool:
+    """这一档是白天档吗？决定起白天 BGM 还是夜间 BGM（PR-05）。
+
+    ⭐ **为什么判「关卡名」而不是「游戏全局只有一个时间」**：
+       2026-10-05 Ronny 把三档并成**一档「正午」**，设定是「白天大中午偷」
+       （见 `NIGHTS` 上面那段裁决注释）。
+       ⇒ 现在**唯一那档就是白天档**，但起的是夜间 BGM `bgm_steal`，设定与音频对不上。
+
+    ⭐ 认这两个词（`正午` / `白天`），⛔ 别写死成"只有一档所以总是白天"——
+       以后加夜档时这一行能自动分流，不用回来改。
+    ⚠️ 判据在**配置**里查而不是硬编码在这里，是为了让每档能显式覆盖：
+       `cfg["bgm"]` 存在就以它为准（见 `start_night`）。
+    """
+    name = str(cfg.get("name", ""))
+    return ("正午" in name) or ("白天" in name)
+
+
+def _stop_level_bgm(snd) -> None:
+    """⭐ 停掉**这一档可能在响的所有 BGM**（PR-05：白天 + 夜间两套共存）。
+
+    ⛔ **为什么要这个函数，而不是在每个调用点列举名字**：
+       结算（`_show_result`）和被抓（`_on_caught`）两处原本都只写了
+       `stop_loop("bgm_steal")`。加了白天 BGM 之后，
+       ⛔ 它们会**漏停白天那条 ⇒ 结算面板上白天 BGM 还在响**
+       （结算面板是**不限时**的，玩家会一直听着）。
+       而每加一条 BGM 就要回来补一次 `stop_loop` ⇒ 迟早再漏。
+       ⇒ 改成「枚举 `_loops` 里所有 bgm_* 一次停干净」，**以后加 BGM 不用改这里**。
+
+    ⚠️ 只停 `bgm_` 前缀。（2026-10-06 PR-06：原先这里还写着"环境音走
+       面板期降音量那条线，它要在结算期间继续响"——那条线已随 Ronny
+       「环境音不要了」一起删干净，这里同步更新，别再引用它。）
+    """
+    if snd is None:
+        return
+    for name in [k for k in list(getattr(snd, "_loops", {}).keys())
+                 if k.startswith("bgm_")]:
+        snd.stop_loop(name)
+
+
+def _level_bgm_name(cfg: dict):
+    """这一档该起哪条 BGM。白天档→ 预拼循环件；其余 → `bgm_steal`；取不到 → None。
+
+    ⭐ 抽成函数的原因（2026-10-06 BGM 起播修复）：
+       `start_night` 与"押送回窝结束回到 play"两处都要决定起哪条。
+       两处各写一份 `import audio` + 分流 ⇒ 以后改分流要回来改两处，
+       而漏改的那一处症状是**"被抓一次之后 BGM 永久静音"**（已实测踩过）。
+    ⛔ 白天 BGM 的 import 必须**函数内**（同`_make_audio` 的纪律：
+       打包漏 QtMultimedia 时顶层 import 会让窗口都开不出来）。
+    """
+    try:
+        import audio as _audio
+    except Exception:                            # pragma: no cover
+        return None
+    # 关卡配置里显式指定 bgm 就以它为准
+    name = str(cfg.get("bgm") or "") or None
+    if name is None and _is_day_level(cfg):
+        name = _audio.BGM_DAY_LOOP
+    return name
+
 
 # ============================================================================
 # ① 关卡数据 —— 深夜厨房（灰盒，改这里就能改关卡）
 # ============================================================================
 
 VW, VH = 1280, 720
+
+# ⭐⭐⭐ 2026-10-05 PR-03 第一批：左右镜头跟随
+#   世界宽 3840（= 3 张 1280 切片），视口仍是 VW ⇒ cam_x ∈ [0, 2560]
+WORLD_W = 3840
+CAM_X_LAG   = 6.0        # 平滑系数。⛔ 别>10（滞后）别<4（硬跟）
+CAM_X_DEAD  = 24.0       # 死区半宽：露娜在 cam_x+640±24 内移动 ⇒ 镜头**完全不动**
+CAM_X_CENTER = VW * 0.5  # 视口中心 = 640
+CAM_X_MAX   = WORLD_W - VW      # = 2560
 
 FLOOR_Y = 599               # ⭐⭐ 2026-10-03 按**背景板实测**（派单 42 v3）：
                             #   设定端程序二次确认（y=580 行内std 13.61 平滑区 →
@@ -67,6 +155,8 @@ NEST_X0, NEST_X1 = 10, 200    # ⭐「阳台」：露娜住的地方（回这里
 #   Ronny 明确要求「茶几和冰箱重合的问题最好也修修，让他们错开」——
 #   重合不是"前景遮挡所以合理"，是背景板 v3 本身就把两个家具画在同一处。
 #   现布局冰箱已挪到右墙 1120~1250，与茶几 430~700 完全错开（见下方 10-04 段）。
+# ⛔⛔ 2026-10-06 追加作废：PR-04 曾把这组x 按实拍暂改成 690~1180，
+#   但 BG02i 要按图生图 prompt 整体重绘 ⇒ 坐标表作废、已回退。**别再照那张表改。**
 TABLE_X0, TABLE_X1, TABLE_TOP = 430, 700, 488   # ⭐ 餐桌具名常量（桌布左/右/桌面顶）
                                                 #   实心墙/攀爬区/冰箱判定共用这一份，别再各写一遍数字
 # ⭐⭐⭐ 2026-10-04 重排（配合背景板 v4）：冰箱从「茶几正后方」挪到**右墙独立段**。
@@ -82,8 +172,19 @@ TABLE_X0, TABLE_X1, TABLE_TOP = 430, 700, 488   # ⭐ 餐桌具名常量（桌�
 #      台下留空当通道。微波炉 161px 高（599−161=438 > 435 台面下沿）→ **它从台面下方
 #      穿过去在视觉上是对的**（它本来就比台面矮）。露娜也能从台下走，或跳上台面。
 #   ⭐ 这是「游戏逻辑 > 氛围与真实性」的直接落地：为了留出巡逻通道，台下不做成实心柜体。
+# ⛔⛔ 2026-10-06 **PR-04 坐标重排已作废**（BG02i 要按图生图 prompt 整体重绘，
+#   家具位置/顶面高度都会变）。曾按实拍暂改成 茶几 690~1180 / 台 2040~2320 /
+#   吊柜 2015~2320 / 冰箱 1925，等 PR04v2 重新给表。**当前这组是旧示意图布局，勿当实测。**
 PLATFORMS = [
-    (0,    FLOOR_Y, VW, VH),        # 地板
+    # ⭐⭐⭐ 2026-10-05 P0：地板右沿 `VW` → `WORLD_W`。
+    #   病根同 investigate：PR-03 把世界改成 3840 时只改了 `_clamp_x`，
+    #   忘了平台表 —— 而 `_clamp_x` 放行到 x=3801，**地板却只到 1280**。
+    #   ⛔ 实测（_work/_探_地板右沿.py）：露娜从 x=1200 起跑，
+    #   第 8~12 帧就在 x≈1302 处踩空（站立判定的有效右沿 = 1280+BODY_W*0.35 = 1301.7），
+    #   掉进 y>VH+200 的兜底 ⇒ **被瞬移回窝，赃物清零**。
+    #   ⇒ 玩家往右跑会「突然被拽回窝」，这是穿帮不是玩法。
+    #   ✅ 一改就好（实测扩到 WORLD_W 后她能走到 x=3801 站稳）。
+    (0,    FLOOR_Y, WORLD_W, VH),   # 地板
     (TABLE_X0, TABLE_TOP, TABLE_X1, FLOOR_Y),  # ⭐ 餐桌（桌布左 430 / 右 700 / 桌面 488）
     (760,  380,     1060, 418),     # ⭐ 厨房台：顶 380 / **底 418（薄台面，架空可穿行）**
     (790,  50,      1010, 189),     # ⭐ 吊柜（柜顶 50 / 下沿 189 / 左 790 / 右 1010）
@@ -135,18 +236,27 @@ LADDERS = [
                             #   视觉下摆 632 只是"布画到那里"，落脚点必须 = 地板。
     (900,  232, 310),       # ⭐ 挂毯攀爬：上端 232（挂杆）→ 下端 310
                             #   ⭐ 2026-10-04 对准新吊柜(790~1010)：x 由 762 → 900，
-                            #   下端 300 → 310（实测从厨房台顶 397 起跳最高 193，
-                            #   抓毯区间 [222,320] 稳稳吃进 —— 旧值 300 只差 2px，很脆）。
-                            #   ⭐ **实测数据**：跳跃上限 = 204px（不是解析 211，离散积分会掉一点）。
-                            #     厨房台顶 397 起跳到 193 → 吊柜底 189 差 4px 上不去 ⛔
-                            #     ⇒ 吊柜**只能靠挂毯上去**，这个 4px 是"必须保留挂毯"的硬理由。
+                            #   下端 300 → 310（抓毯区间 [222,320] 稳稳吃进 —— 旧值 300 只差 2px，很脆）。
+                            #   ⭐⭐ **实测数据（2026-10-05 verifier 独立复核，推翻旧结论）**：
+                            #     · 夜间跳跃速度 JUMP_V=920、GRAVITY=2000 ⇒ 跳高 211.6px
+                            #       （离散积分实测 204.00px）
+                            #     · 从挂毯顶 y=232 起跳 ⇒ 可上吊柜【顶面 y=50】，
+                            #       实测 5/7 种操作站稳 15 帧
+                            #       （原地跳 / 长按 / 小幅横移都行；
+                            #        ⛔ 左或右按 30 帧会飞出 x 范围落到台 y=380）
+                            #     ⛔ **旧注释「厨房台顶 397 起跳到 193 → 吊柜底 189 差 4px 上不去」是错的**：
+                            #       那个 193/204 是**桌宠主程序**的值，不是夜间关卡的。
+                            #     ⭐ **挂毯的真正作用**：把「台 380 → 柜 50」这 330px 拆成
+                            #       191px（台380→毯232）+ 182px（毯232→柜50），两段都在 204px 内。
+                            #       ⛔ 没有挂毯时，玩家在台面直接跳要够 330px > 204px，**上不去**。
+                            #       ⇒ 这是"必须保留挂毯"的真正硬理由，**不是 4px**。
 ]
 
 # ⭐⭐ 攀爬面（2026-10-03「桌子地形很奇怪」修复）：桌布是**全覆盖垂到地**的整面布，
 #   不是一根杆 —— 整面（470~730 × 488~599）都应该能扒着往上爬。
 #   同时这面布对地面行走是**实心墙**（见 Luna.update 里的布墙判定），
 #   ⛔ 不能再让她从桌布里面穿过去 —— 背景板里布是垂到地的，穿模一眼假。
-#   冰箱（1120~1250）已挪到**右墙独立段**，与茶几（430~700）完全错开 ——
+#   冰箱（1120~1250）已挪到**右墙独立段**，与茶几（430~700）完全错开——
 #   所以 QTE 回到最自然的语义：**站在冰箱正前方的地板上**按 E（见 _at_fridge）。
 LADDER_ZONES = [
     (TABLE_X0, TABLE_X1, TABLE_TOP, FLOOR_Y),   # 桌布整面：左 430 / 右 700 / 顶 488 / 底 599
@@ -248,11 +358,16 @@ LAND_TOL    = 2.0           # 落地判定容差（平台顶面上下各 2px 都
 # ⭐ 三段时长是这套手感的命门，调参时只改这里：
 #   ·前摇 0.16s = 玩家能"看清自己在做什么"，也够守卫走过来打断
 #   · 命中 0.09s= 判定窗口，太长会打到不存在的目标
-#   · 后摇 0.26s = 惩罚连打；这段时间还能微调方向但跑不开
+#   · 后摇 0.42s = 惩罚连打；这段时间还能微调方向但跑不开
+#     ⭐ 2026-10-05 Ronny 拍板 0.26 → **0.42**：合计 0.16+0.09+0.42 = **0.67s**，
+#       正好够美术端的 16 帧 pingpong（8 个姿态正放 = 8/12 = 0.667s）播完。
+#       ⛔ 旧值 0.26 ⇒ 合计 0.51s ⇒ **第 5 帧「右爪横扫」永远播不到**，
+#       而验收线要靠那一帧证明"不是拳击手" ⇒ 动画比动作短，自相矛盾。
 #   · 冷却 0.12s = 在后摇之后，让"打空一下"有明确的手感断点
+# ⛔ 只改 ATK_REC：前摇/命中的时序已对上手感，⛔ 别动 ATK_WIND / ATK_ACT。
 ATK_WIND     = 0.16
 ATK_ACT      = 0.09
-ATK_REC      = 0.26
+ATK_REC      = 0.42
 ATK_CD       = 0.12
 # ⭐ 攻击范围（身前单向）：62px。比容器的 hit 半径(46~54)宽 ——
 #   玩家不需要贴到像素级才打得到，但要够不到"隔着台面"的容器。
@@ -306,9 +421,40 @@ NOISE_DECAY = 0.30          # ⛔⛔ 死常量，**全项目零引用**（实测
                              #   真正生效的衰减是 ALERT_DECAY(0.8/秒)，不是这个 0.30。
                              #   ⛔ 别照这条注释去推演"回一趟窝噪声掉多少"—— 会算错 2.6 倍。
                              #   保留只为兼容旧引用；新逻辑一律读 ALERT_DECAY。
-MW_HEAR_R   = 420.0         # ⭐ 听觉半径。⛔ 不能开大：室内可活动区宽 770px，开到 560 就是“全室都听见”，噪声机制等于没有。
-                             # 420 让它变成位置相关的战术资源：微波炉走到东边时，西侧台面的容器就能安静顶掉。
+MW_HEAR_R   = 240.0         # ⭐ 听觉半径（px）。
+                             # ⛔⛔ 2026-10-05 Ronny 定「他应该安静呆着」后，由 420 收窄到 240。
+                             #   ⭐ 理由（⚠️ 下面提到560 那个数字是**旧世界宽度**下的说法，别再照它推演）：
+                             #     · 420 覆盖可活动区约 1/3 宽 ⇒ 你在房间任何地方敲一下他都听得到
+                             #       ⇒ 位置管理作废（实测：站在他背后 61px 也会被察觉）
+                             #     · 240 ⇒ 只有靠近他才听得见，潜行重新有意义
+                             #   ⛔ 旧注释写「开到 560 就是全室都听见」——那是 1280px 宽世界下的估算；
+                             #     在 3840px 地图里 560 只占 1/7。
+                             #     程序端 10-05 报出此处数字不一致，判定正确
+                             #     （引擎文件属程序端，设计端只报告不改）。
 SNEAK_SPEED = 108.0         # 潜行速度（正常 300）—— 36%，与桌宠侧 sneak 的 stride 同比例
+
+# ============================================================================
+# ⭐⭐⭐ 待机（idle）—— Ronny 2026-10-05 定位拍板
+#   原话：「他应该**安静呆着**，看到露娜干坏事就冲刺出来抓才是对的」
+#   ⇒ 他从「一直在踱步的警卫」改成「**站岗的猫**：默认不动，被惊动才动」
+# ============================================================================
+# ⛔⛔ 为什么改（旧版的病根不是数值，是**默认状态**）：
+#   旧版 `_patrol` 是"走 2.2s → 停 0.7s → 转身 → 走"的无限循环，
+#   而 patrol 段 (820,1108) 恰好横跨整个禁区中段⇒
+#   ① 玩家在禁区的容器 (660/820/900/1000) 四分之三落在他走动范围里
+#   ② 他一直在动 ⇒ 玩家永远找不到"安全窗口"
+#   实测：露娜在 x=1000 静止不动，1 秒内 alert 就拉满并 chase
+#   （alert_gain=1.5/秒 ⇒ 0.67 秒满）⇒ 观感是「恐怖人机」。
+# ✅ 新默认：他**不动**。只有两种情况会动——
+#   ① 听到声音（investigate）→ 走过去看一眼 → 回来继续呆
+#   ② 看见露娜进禁区（chase）→ 冲刺出来抓
+# ⛔ 素材缺"待机"动作怎么办：**先不画**，逻辑上他站着不动就行。
+#   玩法铁律「素材只管动作」不要求每个状态都有专属帧。
+IDLE_STIR_P     = 9.0        # 待机时每隔多久「轻轻转头看看」（秒）
+                              # ⛔ 别短于 8s：实测 5s 时20 秒内转头 10 次，
+                              #   那不叫"站岗"，那叫"抽搐"。9s ≈ 玩家换一次位置的时间。
+IDLE_STIR_TURN  = True       # ⭐ 待机的"踱脚"只转头，⛔ 不平移
+                               # 理由：平移就变回"巡逻"了。猫站岗时会扭头，但不会挪窝。
 
 # ============================================================================
 # ⭐⭐ investigate（查看声源）—— Ronny 2026-10-04 拍板「方向二」
@@ -356,7 +502,14 @@ NEED_ACTIONS = ["idle", "walk", "human_run", "jump", "fall", "climb", "land",
 # ---- 游戏专用素材（2026-10-03 派单 35 回传）----
 # ⭐ 放在 自研引擎/assets_game/，不进 packs/ —— 微波炉不是桌宠角色，不该进桌宠包。
 GAME_ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets_game")
-GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0}
+# ⭐ 夜间**覆盖**桌宠动作 fps 的地方。键= 动作名（与 `pick_action()` 返回值同名）。
+#   ⛔ 为什么需要它：`punch > 0` 时 `pick_action()` 返回 **"tease"**，
+#     而 tease 的 fps 来自 packs/luna（12.0）—— 那是**桌宠**定的，
+#     夜间冒险要用它播 8 个攻击姿态，12fps 只能"刚好卡线"（0.67s = 8.04 帧）。
+#   ✅ 提到 15.0 ⇒ 0.67s 能放 10.05 帧 ⇒ **8 姿态 + 2 帧余量**，
+#     模型出7 帧或 9 帧都不会砍掉关键姿态。
+#   ⭐ Ronny 2026-10-05 19:58 拍板「都改」。
+GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0, "tease": 15.0}
 # ⭐ 素材的**原始朝向**（+1 朝右 / -1 朝左），实测自素材本身，不是猜的：
 #   mw_walk 素材朝左（能看到侧脸和制服前襟，尾巴在右后）→ -1
 #   run_carry 素材朝右（脸朝右，鱼在右边的嘴里）    → +1
@@ -413,31 +566,30 @@ _NIGHT3 = [
     {"x": 1060, "y": 599, "icon": "watermelon", "kind": "jar"},    # ⭐ jar（全图最深，冰箱脚下）
 ]
 
+# ============================================================================
+# ⭐⭐ 2026-10-05 Ronny 拍板：三档 → **只留一档（最难那档）**
+#
+# 保留的是原【凌晨三点】（`_NIGHT3`）—— 它在**所有维度**都最难：
+#   听圈 180 / 视野 350 / 警戒增速 2.5 / 巡逻 120 / 边界 360（禁区最深）/ 容器 7 个
+# ⇒ 难度不降反升，但玩家不用在三档里挑了。
+#
+# ⛔ **`sub` 的字我一个都没动**（设计端要求：等 Ronny 给「白天大中午偷」的新文案）。
+#   ⛔ 所以现在这句「整层楼只有冰箱在响」在设定上**已经不成立**了（白天 + 环境音已删），
+#     那是**已知待改**，⛔ 别当成"没人发现"。
+#
+# ⭐ UI 不用改：`len(NIGHTS)==1` 时菜单的上下键切换自然失效（正确行为），
+#   `Key_1/2/3` 仍映射到同一档（见 keyPressEvent）。
+# ⚠️ 但 `NightWindow.night_idx` 默认值**必须**从 1 改成 0 —— 否则启动就 IndexError。
+# ============================================================================
 NIGHTS = [
     {
-        "name": "初更",
-        "sub": "厨房灯刚灭，微波炉还没开始踱步",
-        "stashes": _NIGHT1,
-        "border_x": 500,
-        # ⭐ 2026-10-04 重排：厨房台改成**架空薄台面**（顶 397 / 底 435），
-        #   微波炉（161px 高，599−161=438 > 435）能从台面**下方**穿行 ⇒ 不再穿模。
-        #   ⭐ 所以巡逻段可以横跨 700~1100 这整条，包括茶几右边与厨房台下方。
-        "patrol": (820, 1108), "patrol_speed": 75.0,
-        "chase_speed": 205.0, "sight": 240.0, "hear": 110.0,
-        "alert_gain": 1.5, "alert_hear": 0.8,
-    },
-    {
-        "name": "深夜",
-        "sub": "正常的夜里。它开始踱步了。",
-        "stashes": _NIGHT2,
-        "border_x": 430,
-        "patrol": (790, 1108), "patrol_speed": 95.0,
-        "chase_speed": 250.0, "sight": 300.0, "hear": 150.0,
-        "alert_gain": 1.9, "alert_hear": 0.95,
-    },
-    {
-        "name": "凌晨三点",
-        "sub": "整层楼只有冰箱在响。吊柜顶上那几样最好。",
+        "name": "正午",
+        # ⭐⭐ 2026-10-05 Ronny 20:44 亲自写的文案，**逐字用，⛔ 别改标点**：
+        #   中间的「，」和末尾的「~」都是他特意写的。
+        #   ⚠️ 末尾是**半角波浪号 `~`**（U+007E）—— Ronny 原话我没找到落盘文件，
+        #      这是按设计端转述逐字落的。⏳ 若 Ronny 要的是全角「～」，
+        #      只改这一个字符。
+        "sub": "阳光正好，他在打盹。我来看看屋里有什么吃的~",
         "stashes": _NIGHT3,
         "border_x": 360,
         # ⭐ 东端收到 1180：冰箱移到 1120~1250 之后，巡逻右端**不能进冰箱体**
@@ -613,6 +765,12 @@ class Luna:
         self.dash_i = 0.0      # ⭐ 无敌帧剩余（>0 时被抓判定失效）
         self.dash_cd = 0.0# 冷却
         self.dash_dir = 1      # 冲刺方向（快照，⛔ 不能读实时按键，冲刺中转向= 瞬移）
+        # ⭐⭐ 落地回调（2026-10-06 PR-06 接 `sfx_land` 用）。
+        #   ⛔ Luna 自己**不import audio、不拿窗口对象**（同 `sneak_ok` 的纪律：
+        #     物理层不依赖音频层，打包漏 QtMultimedia 时也照样能跑）。
+        #   ✅ 由 `NightWindow.start_night` 注入一个函数，物理层只在
+        #     「空中 → 落地」那**一帧**喊它一声（见 `update` 里的落点判定）。
+        self.on_land = None
 
     # ---- 物理 ---------------------------------------------------------
     def update(self, dt, keys, room):
@@ -832,6 +990,15 @@ class Luna:
         #   单独结算会被无条件抹掉（踩过：判据看着对，人还是往下穿）。
         #   ✅ 所以冰箱顶走"伪平台"路线：塞进下面那个落点循环，一起参与"取最高"的比较。
 
+        # ⭐⭐ 2026-10-06 PR-06：落地音只在「**空中 → 落地**」这一帧响一次。
+        #   ⛔⛔ 别在下面 `on_ground = True` 那一行**无条件**触发：
+        #     `on_ground` 在**站着不动时每帧都会被重新判成 True**
+        #     （这正是上面那个判据的写法——它必须这样才能解决"站着时隔帧抖"），
+        #     无条件触发 ⇒ 站着不动就一直重播 0.35 秒的落地音，糊成一片。
+        #   ⇒ 所以先把"这一帧开始时是不是已经站在地上"存下来，只在**由虚转实**时喊。
+        #   ⚠️ 存的位置在爬梯分支**之后**：爬梯到顶/踩上沿那几处也会把 on_ground 置 True，
+        #     于是它们天然被排除 ⇒ 爬梯落地**不响**落地音（派单明确要求）。
+        was_ground = self.on_ground
         self.on_ground = False
         if self.vy >= 0:
             # ⭐⭐ 单向平台落地的正确写法。踩过的两个坑：
@@ -857,6 +1024,13 @@ class Luna:
                 self.y = float(hit)
                 self.vy = 0.0
                 self.on_ground = True
+                # ⭐ 落地音（PR-06）。**全场唯一接 `sfx_land` 的地方**。
+                #   ⛔ 爬梯那三处（爬到台面沿/爬到顶/爬到底）⛔ 不接——
+                #     它们不走这个落点判定，且派单明确要求"爬梯落地不响"。
+                #   ⛔ 阈值 `not was_ground`：站着不动时 `on_ground` 每帧都为 True，
+                #     不看这个就会每帧重播。
+                if not was_ground and self.on_land is not None:
+                    self.on_land()
 
         self._clamp_x(room)
         self.moving = abs(self.vx) > 1.0 or abs(self.vy) > 1.0
@@ -865,8 +1039,12 @@ class Luna:
             self.moving = False
 
     def _clamp_x(self, room):
+        # ⭐⭐ 2026-10-05 PR-03：夹的是**世界宽**，不再是视口宽。
+        #   旧版夹 VW(=1280) ⇒ 露娜永远走不出1280，3840 的世界对她等于不存在。
+        #   ⛔ 边距沿用原来的 +8（贴边留一点，别让身体切在屏幕上）。
         half = BODY_W * 0.5
-        self.x = max(half + 8.0, min(VW - half - 8.0, self.x))
+        world = float(getattr(room, "world_w", WORLD_W) or WORLD_W)
+        self.x = max(half + 8.0, min(world - half - 8.0, self.x))
 
     def _ladder_here(self, room):
         # ⭐⭐ 攀爬面（桌布整面）优先于点梯：布是垂到地的一整面，面上任意 x 都能扒。
@@ -998,6 +1176,15 @@ class Microwave:
         self.invest_hold = 0.0
         # ⭐ 难度参数全部来自档位配置（不是模块常数）
         self.p0, self.p1 = float(p0), float(p1)
+        # ⭐⭐⭐ 2026-10-05 P0：他会移动的**世界宽**（不是视口宽）。
+        #   病根：investigate 的三处夹取写的是 `VW - w/2 - 8`（= 1224），
+        #   而世界是 3840 ⇒ 他能去查看的范围只有 [56, 1224] = 世界的 30%，
+        #   C/D/E/F 四个区（1440~3840）里的容器他**永远走不过去**。
+        #   ⛔ 同一条路径上的 `_chase` 当时**完全没有夹取** ⇒ 他能为露娜追到 x=3000，
+        #     却不会为一声响走到 x=1300 —— 同一个守卫两套活动范围，自相矛盾。
+        #   ✅ 与 Room.world_w / Luna._clamp_x 同一套口径（同为"谁改了都有处可查"的显式字段）。
+        #   每帧由 update() 从 room 同步 ⇒ room 是唯一真源，这里只是缓存。
+        self.world_w = float(WORLD_W)
         self.patrol_speed = float(cfg["patrol_speed"])
         self.chase_speed = float(cfg["chase_speed"])
         self.sight = float(cfg["sight"])
@@ -1008,8 +1195,20 @@ class Microwave:
         #   没有它的话微波炉会长时间背对同一个方向，露娜可以站在它背后大摇大摆地偷
         #   （实测：固定巡逻时 alert 一直是 0）。猫不是摄像头，但也不是扫描仪，
         #   给它一个"走走停停回头看"的节奏，玩家就有可预判的窗口期。
+        # ⛔ 2026-10-05：walk_t/dir 随巡逻一起退役（待机不动了）。
+        #   保留字段是因为别处还在读（_investigate 末尾要清它们，见该方法不变量③）。
         self.walk_t = 2.0
         self.pause_t = 0.0
+        # ⭐⭐ idle_t：待机时距离下一次「扭头看看」还有几秒（Ronny「安静呆着」）
+        # ⭐ 初始相位取一半（不是 0）：让"第一次转头"发生在 4.5s 而不是 0s，
+        #   否则玩家开局就看到他猛地扭头，突兀。
+        self.idle_t = IDLE_STIR_P * 0.5
+        # ⭐⭐ idle_home：他**站岗的位置**。investigate 看完要回到这里，
+        #   而不是继续巡逻（旧版没有"回家"这个概念，investigate 结束就回巡逻循环）。
+        #   ⛔ 记成 float 一次即可：他站着不动 ⇒ 站位不变 ⇒ 不需要每帧更新。
+        self.idle_home = float((p0 + p1) * 0.5)
+        # ⭐ 回程标志：investigate 看完 ⇒ True ⇒ 走向 idle_home 且到位不环顾
+        self._go_home = False
         self.hear_x = None         # 最近一次听到的声源 x（让他转头）
         # ⭐⭐ frenzy（疯狂追踪）—— Ronny 2026-10-04「罐子一破，警卫会直接疯狂追踪」
         #   与 chase 的区别不是"更凶一点"，是**性质变了**：
@@ -1023,35 +1222,82 @@ class Microwave:
         self.stun = 0.0            # 被露娜攻击击退后的硬直
         self.knock_vx = 0.0        # 击退速度（会衰减）
 
-    def sense(self, luna) -> float:
-        """返回察觉强度：1.0 正面看见 / 0.5 背后听见 / 0.0 毫无察觉
+    def _clamp_self_x(self):
+        """⭐⭐ 把**自己**的 x 夹进可活动区 `[体型半宽+8, 世界宽-体型半宽-8]`。
 
-        ⭐ 为什么要有"背后听见"这一档：只有正面视野时，露娜只要绕到微波炉背后
-        站着就绝对安全（实测：她站 x=900、微波炉朝右走到 950，alert 一直是 0）。
-        猫不是摄像头，近到 150px 不可能没反应 —— 但也不该跟正面一样快，
-        否则"从背后溜过去"这个玩法就没了。
-
-        ⭐⭐ 「在梯子上 = 安全」（抄 Lode Runner：守卫不会追到玩家所在的梯格）。
-        这是那游戏最关键的一条：它让**高处**有了明确回报，玩家会主动往高处钻。
-        顺带省掉微波炉的爬梯/拎起素材 —— 他只在地板上巡逻就够了。
+        ⭐⭐⭐ 2026-10-05 P0 新增（`VW` → `WORLD_W`）。
+        ⛔⛔ 原来的三处夹取各写一份 `min(VW - half - 8.0, ...)`，那是**视口宽**。
+          世界宽已是 3840（PR-03）而视口仍是 1280 ⇒
+          他能去 investigate 的范围被锁死在 [56, 1224]，只占世界 30%。
+        ⭐ 收成方法而不是就地改三处：这三处**同一天里被漏改过两次**
+          （`_clamp_x` 改了、investigate 没改；本单又差点只改其中一处）。
+          一份实现 = 以后漏改无处可藏。
         """
-        # ⭐⭐ 梯子上不再是"完全安全"（Ronny 10-03：给微波炉爬梯能力，上点强度）
-        #   从 0.0 改成 0.3 —— 他爬上来要时间（速度只有露娜一半），
-        #   所以爬梯是**相对安全**而不是绝对安全：能拖住你，拖不死你。
+        half = self.w * 0.5 + 8.0
+        self.x = max(half, min(self.world_w - half, self.x))
+
+    def _clamp_target_x(self, at_x: float) -> float:
+        """⭐ 把**声源x** 夹进可活动区（2026-10-05 P0：`VW` → `WORLD_W`）。
+
+        ⚠️ 与 `_clamp_self_x` 分开是因为**夹的对象不同**：
+           自己的 x 夹的是"体型不许出界"，声源 x 夹的是"目的地不许出界"。
+           两者半宽口径恰好相同（都用 `w*0.5+8`），但语义不同，别合并成一个。
+        """
+        half = self.w * 0.5 + 8.0
+        return max(half, min(self.world_w - half, float(at_x)))
+
+    def sense(self, luna) -> float:
+        """返回察觉强度：1.0 正面看见 / 0.4 背后听见 / 0.0 毫无察觉
+
+        ## ⬝⬝ 2026-10-05 Ronny 定位：他是「站岗的猫」，不是扫描仪
+        # 改动点（实测旧版的问题）：
+        #   旧：背后只要 ≤hear(110~180) 就返回 **0.5**，而 alert_hear 是 0.8~1.3/秒
+        #       ⇒ 站在他背后 60px，一秒内 alert 就满 ⇒ 「多管闲事」
+        #       实测：x=1000 静止不动、他在 760，1 秒后 alert=1.00 state=chase
+        #✅ 新：背后听见降级为 0.25，且要求**更近**（hear × 0.7）
+        #   ⚠️⚠️ 2026-10-05 实测修正（verifier 扫 181 个进入相位，**0 个安全**）：
+        #     「站他背后」的存活时间只有 **0.42 ~ 1.27 秒**
+        #     （初更 0.93 / 深夜 0.77 / 凌晨三点 0.58 平均）。
+        #     ⛔ 所以它【不是可 sustain 的安全区】，
+        #       而是「必须主动管 x 进出的一次性掩体」。
+        #   机制：背后 sense=0.25 ⇒ 慢速涨（涨满需 3~5 秒）；
+        #     但他**每 9 秒转一次 face（IDLE_STIR_P）**，转到朝你时 sense=1.0
+        #     ⇒ 满速涨（0.4~0.7 秒涨满）。
+        #     ⇒ 玩家等不到"慢慢涨满"就会被抓到。
+        #   ⭐ 真正永久安全的站位是【听圈外】（距离 > hear × 0.7，sense 恒 0.0）。
+        #   ⚠️ 旧注释说「背后安全区变大」—— 那只描述了 s 从 0.5 降到 0.25 这件事，
+        #     ⛔ 没有说明"转脸"这个 9 秒周期才是真正的死因 ⇒ 那句话会误导。
+        #
+        # 正面看见也加了距离衰减（近处 1.0 → 视野边缘 0.75）：
+        #   ⛔ 别删——旧版是「视野内一律 1.0」，意味着他在 240px 外和20px 内
+        #     察觉速度完全一样 ⇒ 那不是"看见"，那是"雷达锁定"。
+        #   保留：dist 0 → 1.0, dist = sight*0.6 → 1.0，之后线性降到 0.75。
+        #   ⭐ 意义：玩家贴着他走过去比隔着一段距离更危险 ⇒ 位置管理有了"贴近换时间"的取舍。
+        """
+        # ⭐ 梯子上 = 相对安全（抄 Lode Runner：守卫不追到玩家所在的梯格）。
+        #   0.3 ⇒ 爬梯不是绝对安全，但能拖住你。
         if luna.on_ladder:
             return 0.3
-        dx = (luna.x - self.x) * self.face
-        if abs(luna.y - self.y) >= MW_SIGHT_DY:
+        dx = (luna.x - self.x) * self.face      # 正 = 他面朝的方向
+        dy = abs(luna.y - self.y)
+        if dy >= MW_SIGHT_DY:
             return 0.0
         if -20.0 <= dx <= self.sight:
-            return 1.0
-        if abs(luna.x - self.x) <= self.hear:      # 在背后但很近
-            return 0.5
+            # ⭐ 正面视野：近处满值，视野边缘衰减到 0.75（见 docstring）
+            far = dx / self.sight
+            return 1.0 if far < 0.6 else (1.0 - 0.25 * (far - 0.6) / 0.4)
+        # ⭐ 背后听见：**更近 + 更弱**（旧版：≤hear 就 0.5）
+        if abs(luna.x - self.x) <= self.hear * 0.7:
+            return 0.25
         return 0.0
 
     def update(self, dt, luna, room):
         # ⛔ 越界才追：露娜退回允许区内，微波炉就当没看见 —— 这是"允许区机制"的核心
         trespass = luna.x > room.border_x and not luna.escort
+        # ⭐ P0：可活动区跟着 room 走（room 是唯一真源，这里只是每帧同步缓存）。
+        #   ⛔ 别在这里 clamp x —— chase 路径本来就没有夹取（能追到世界任何地方），
+        #     夹了反而会把"追人跑全图"的行为改掉。只同步宽度。
+        self.world_w = float(getattr(room, "world_w", WORLD_W) or WORLD_W)
 
         # ⭐⭐ frenzy 计时与解除（2026-10-04）
         #   解除条件 =玩家跑回允许区**并放下一件东西**（回窝）。
@@ -1092,6 +1338,19 @@ class Microwave:
         elif s >= 1.0:
             self.alert = min(1.0, self.alert + self.alert_gain * dt)
         elif s > 0.0:
+            # ⚠️⚠️ 2026-10-06 实测澄清（**不是 bug，是设计现状，别"顺手修"**）：
+            #   这一支的涨速恒为 `alert_hear`，**没有乘 `sense`**。
+            #   实测（`_dbg_PR06判据根因.py` ①-b）：
+            #     背后  60px  sense=0.25  每帧 0.0217   ← 涨
+            #     背后  90px  sense=0.25  每帧 0.0217   ← 涨
+            #     背后 120px  sense=0.25  每帧 0.0217   ← 涨
+            #     背后 126px  sense=0.00  每帧 0.0000   ← 听不见
+            #   ⇒ `sense` 在这一支里只当**开关**用（0.25 与 1.00 涨得一样快）。
+            #   ⇒ 另一条配套事实：**背后档的有效门槛 = `hear × 0.7`**
+            #     = 180 × 0.7 = **126px**，127px 起完全听不见。
+            #   ⛔ Ronny / 设计端 2026-10-06 已拍板：**保持现状**。
+            #     真要按强度加权 ⇒ "背后贴着"就和"正面看到"涨得一样快，
+            #     潜行压力上升 ⇒ 那是**玩法变更**，不是修 bug。
             self.alert = min(1.0, self.alert + self.alert_hear * dt)
         else:
             self.alert = max(0.0, self.alert - ALERT_DECAY * dt)
@@ -1117,10 +1376,21 @@ class Microwave:
             #     拿它当条件实测一次都没触发过（守卫只是在踱步）。
             if (self.invest_hold > 0.0 and self.stun <= 0.0
                     and self.hear_x is not None and self.invest_x is None):
-                # 目标夹进可活动区（他不能走出房间）
-                half = self.w * 0.5
-                self.invest_x = max(half + 8.0,
-                                    min(VW - half - 8.0, float(self.hear_x)))
+                # ⭐ P0：夹取收进 `_clamp_target_x`（`VW` → `WORLD_W`）。
+                #   ⛔ 这里不再自己写一份 `min(VW - half - 8, ...)`。
+                _hx = self._clamp_target_x(self.hear_x)
+                # ⬝⬝⬝ 2026-10-05 修一个实测到的抖动（新改动引入）
+                #   病征：声源离他很近时，invest_x 等于他的位置
+                #   → `_investigate` 判定「已到位」立即结束 → invest_x 变 None
+                #   → 下一帧条件①再次成立（invest_hold 还在）
+                #   ↳ 它在 964 / None 之间**逐帧闪烁**，位置不动。
+                #   实测：距离 64px 的声音得到 invest_x=None（被判为没事发生）。
+                # ✅ 修法：**声源已在脚下就不走过去看**——已经在位置上了。
+                #   他会把头转向声源（下面那口代码负责），但不会“走到自己脚下再忽略一次”。
+                if abs(_hx - self.x) > INVEST_RADIUS:
+                    # ⭐ P0：`VW` → `WORLD_W`（夹目的地，不是夹自己）
+                    self.invest_x = self._clamp_target_x(self.hear_x)
+                    self._go_home = False   # ⭐ 新的一次查看，不是回程
             # ---- ② 查看途中又听到新的响动 → 改目标跟过去 ----
             #   ⛔ 但**一次性**（到达就结束），⛔ 不是持续追踪 ——
             #     否则玩家能用噪声把他当导航，潜行的位置管理整套崩掉。
@@ -1135,9 +1405,9 @@ class Microwave:
                     and self.stun <= 0.0 and self.invest_linger <= 0.0
                     and self.hear_x is not None
                     and abs(float(self.hear_x) - self.x) > MW_HEAR_R * 0.5):
-                half = self.w * 0.5
-                self.invest_x = max(half + 8.0,
-                                    min(VW - half - 8.0, float(self.hear_x)))
+                # ⭐ P0：同上，走同一个夹取方法
+                self.invest_x = self._clamp_target_x(self.hear_x)
+                self._go_home = False   # ⭐ 新的一次查看，不是回程
 
         if self.state == "chase":
             self._chase(dt, luna, room)
@@ -1150,24 +1420,45 @@ class Microwave:
             # ⛔ chase 时不抢头：追赶中必须看路，不能被声音带偏。
             if self.hear_x is not None and self.alert > 0.12 and self.state != "chase":
                 self.face = 1 if self.hear_x >= self.x else -1
+            # ⬝⬝ 2026-10-05 Ronny「他不会机械地走来走去」
+            #   【不做的事】：不做“延迟抬头”。
+            #   理由：抬头只是一个视觉反应，而不是位置变化——
+            #   它不影响“他是否发现你”，只是看起来像在回头看。
+            #   ⛔ 而真正的多管闲事是【他走过来】，那是 invest 的事。
 
     def _patrol(self, dt, luna):
-        if self.pause_t > 0:                    # 停下环顾中
+        """⭐⭐⭐ 待机（2026-10-05 Ronny 定位改写）。
+
+
+        ## ⛔ 旧版是"走 2.2s → 停 0.7s → 转身"的无限循环
+        #  病根不是数值，是**默认就在动**：
+        #   · patrol 段 (820,1108) 横跨整个禁区中段
+        #   · 玩家禁区容器 (660/820/900/1000) 四分之三落在他走动范围里
+        #   · 他一直在动 ⇒ 玩家永远找不到"安全窗口"
+        #  实测：露娜 x=1000 静止不动、他在 760 ⇒ 1 秒内 alert 满 + chase
+        #  ⇒ 观感是"恐怖人机"，而不是"保安"。
+        #
+        # ✅ 新版：**他站着不动**，只在待机计时到时轻轻扭头。
+        #   会被惊动的情况只有两种（都不是"巡逻"）：
+        #     ① investigate —— 听到声音，走过去看一眼，然后回来继续呆
+        #     ② chase      —— 看见露娜进禁区，冲刺出来抓
+        #
+        # ⛔⛔ **不许在这里平移**。他一旦平移，"站岗的猫"就变回"巡逻的警卫"，
+        #   玩家又会找不到安全窗口（本轮改动的全部意义就在这条）。
+        #   `self.p0/p1` 保留只作为**初始站位**的取值范围。
+        #
+        # ⭐ 待机的"活气"从哪来：① 定期扭头（不挪窝）② 追出来 ③ 被打了会退
+        #   —— 够了。猫站岗时的"活"是眼神和耳朵，不是腿。
+        """
+        self.idle_t -= dt
+        if self.idle_t <= 0:
+            self.idle_t = IDLE_STIR_P
+            # ⭐ 只转头。⛔ 不动 x。
+            self.face = -self.face
+            # 转头时"看一眼"的顿挫（比瞬间翻面自然）
+            self.pause_t = 0.35
+        if self.pause_t > 0.0:
             self.pause_t -= dt
-            return
-        self.walk_t -= dt
-        if self.walk_t <= 0:                    # 走够了 → 停一下并转身
-            self.pause_t = 0.7
-            self.walk_t = 2.2
-            self.dir = -self.dir
-            self.face = self.dir
-            return
-        self.x += self.dir * self.patrol_speed * dt
-        if self.x <= self.p0:
-            self.x, self.dir = self.p0, 1
-        if self.x >= self.p1:
-            self.x, self.dir = self.p1, -1
-        self.face = self.dir
 
     # ------------------------------------------------------------------
     def _investigate(self, dt):
@@ -1193,7 +1484,24 @@ class Microwave:
             # 环顾时左右转一点，像在找声音来源（比"定住不动"有戏）
             self.face = -self.face if (int(self.invest_linger * 7) % 2 == 0) else self.face
             if self.invest_linger <= 0.0:
-                self.invest_x = None    # 一次性：看完就回巡逻
+                # ⭐⭐ 2026-10-06 PR-07 修（**真bug**，verifier 与我各自独立复现）：
+                #   「查看完回站岗点」原来写在**移动分支的末尾**，每走一帧就把
+                #   `invest_x` 改写成 `idle_home`；而 `tgt` 是函数开头读的
+                #   ⇒ 下一帧目标已经是站岗点，**他永远朝站岗点走、从不去看声源**。
+                #   实测：声源 500 / 他 620 / 站岗点 934 ⇒ 全程离声源最近 **117.2px**
+                #   （INVEST_RADIUS 只有 30）⇒ 「走过去查看声源」这个功能等于没上线，
+                #   而所有相关判据因为"去站岗点的路上路过声源"全部**假绿**。
+                #
+                #   ✅ 正确的时机是**环顾结束之后**，不是"到达的那一刻"：
+                #      到达 → 环视（站定不动）→ 环视结束 → 才把目标改成站岗点走回去。
+                #   ⚠️ 为什么不能像最初想的那样在「到位」分支里就设 `invest_x=idle_home`：
+                #      那样环视期间目标已经是站岗点，而环视结束这支队`invest_x = None`
+                #      ⇒ 他**看完就站在声源旁边不动了**，违反 2026-10-05「看完要回站岗点」。
+                #   ⛔ 原来那行`self.invest_linger = 0.0` 是**删掉**、不是搬过来：
+                #      它原本的职责是"还没到位所以不环顾"；
+                #      搬进「到位」的 else 会变成刚赋 INVEST_LINGER 又清零 ⇒ 环视 0 秒。
+                self._go_home = True
+                self.invest_x = self.idle_home
                 # ⭐⭐ 连linger 一起清零（2026-10-04 实测）：
                 #   只清 invest_x 会留下**负值** linger（实测 -0.02），
                 #   看着像"还有 0 秒的查看在进行"，下次的判据 `linger <= 0.0`
@@ -1208,19 +1516,40 @@ class Microwave:
         dx = tgt - self.x
         if abs(dx) <= INVEST_RADIUS:
             # 到位 → 进入环顾
-            self.invest_linger = INVEST_LINGER
+            if self._go_home:
+                # ⭐⬈ 回站岗到位：直接停，不环视
+                #   ⛔ 不能进环视：对着自己站的地方“低头看一会儿”
+                #   比不动更拟人。到位就是到位。
+                self.invest_x = None
+                self._go_home = False
+                self.idle_t = 0.0      # ⭐ 到家后立即允许下次抬头
+                self.pause_t = 0.0
+            else:
+                # 到位 → 进入环视
+                self.invest_linger = INVEST_LINGER
             return
         self.face = 1 if dx > 0 else -1
         # ⛔ ① 速度硬上限
         self.x += self.face * min(INVEST_SPEED, RUN_SPEED - 8.0) * dt
         # ⛔ ② 再夹一次（p0/p1 是巡逻范围，但查看目标可能落在它之外）
-        self.x = max(self.w * 0.5 + 8.0, min(VW - self.w * 0.5 - 8.0, self.x))
+        # ⭐ P0：`VW` → `WORLD_W`（这是本单修的三处里**最要命**的一处 ——
+        #   就算上面两处目标夹对了，自己走位仍被锁在 1224 ⇒ 他永远走不过去）。
+        self._clamp_self_x()
         self.y = FLOOR_Y                 # 查看只在地板上走（⛔ 不爬梯：他只是去看一眼）
         # 打断踱步节奏的残留：查看结束后 patrol 会用这两个值，
         # 这里主动清零，避免"刚查完立刻又停 0.7s"的观感（见不变量 ③）
         self.pause_t = 0.0
         self.walk_t = 1.0
         self.y = FLOOR_Y
+        # ⚠️⚠️ 2026-10-06 PR-07：原来"查看完回站岗点"的三行
+        #   （`_go_home = True` / `invest_x = self.idle_home` / `invest_linger = 0.0`）
+        #   写在这里 —— **移动分支的末尾**。那是全项目最隐蔽的一个 bug：
+        #     `tgt = self.invest_x` 在函数**开头**读，而这里每走一帧就把目标
+        #     改写成站岗点 ⇒ **下一帧读到的已是 idle_home，声源坐标被覆盖**，
+        #     他永远朝站岗点走，"走过去查看声源"从未真正发生。
+        #   ✅ 已挪到「环顾结束」那一支（见函数开头的 linger 分支）。
+        #   ⛔ 别挪回来。挪回来这条判据立刻变回假绿，而且**测不出来**——
+        #     因为"去站岗点的路上"经常刚好路过声源。
 
     def _chase(self, dt, luna, room):
         # ⭐⭐ 跳跃物理（Ronny 10-03 新增）：先算重力，再判是否落地
@@ -1309,7 +1638,10 @@ class Microwave:
            ⛔ 所以：heard 太弱 → 只按普通噪声走，不进 frenzy。
         """
         # ⭐ 阈值 0.30：低于这个强度就只是"听见点动静"。
-        #   换算成距离（M=420 平方衰减）：heard 0.30 ≈ 距离 330px 以内。
+        #   换算成距离（**M=240** 平方衰减，2026-10-05 由 420 收窄）：heard 0.30 ≈ 距离 **172px** 以内。
+        #   ⚠️ 旧注释写「M=420 / 330px」是 MW_HEAR_R 收窄时漏改的
+        #     （那是 1280px 宽世界下的估算；verifier 实算 M=420 会得到 301.7px）。
+        #   （历史批注：Ronny 17:55 听到的「24岁白女」问题与此无关，那是 sfx_caught 音色）
         #   也就是"贴身或在半个房间内破罐"才引爆。
         if heard < 0.30:
             return False
@@ -1357,6 +1689,10 @@ class Microwave:
 class Room:
     def __init__(self, cfg: dict):
         self.platforms = list(PLATFORMS)
+        # ⭐⭐ 2026-10-05 PR-03：世界宽（镜头跟随用）。旧代码无此概念。
+        #   ⛔ 显式存成实例字段而不是全局读 —— 与 border_x 同一处置：
+        #   谁改了它都有个可查的地方，漏改时不会"毫无反应"。
+        self.world_w = float(WORLD_W)
         self.ladders = list(LADDERS)
         self.ladder_zones = list(LADDER_ZONES)
         # ⭐ 微波炉用的"可攀爬目标"：点梯原样 + 攀爬面取中心 x（它走向中心再爬，
@@ -1418,7 +1754,14 @@ class NightWindow(QWidget):
         print(f"[夜间] 赃物图标 {len(self.icons)}/{len(_all_ic)}")
 
         # ---- 状态 ----
-        self.night_idx = 1                    # 0/1/2 → NIGHTS
+        # ⭐⭐ 2026-10-05 PR-03：横向镜头。cam_y **刻意不存在** ——
+        #   派单说"纵向镜头逻辑已实测通过"，实测是**代码里根本没有纵向相机**
+        #   （全文件无 cam_y/p.translate(0,-cam_y)）⇒ 纵向本来就是固定的。
+        #   ⇒ 这里保持纵向不动，只加横向。不凭空引入未验证的纵向跟随。
+        self.cam_x = 0.0
+        # ⭐ 2026-10-05 三档合一档 ⇒ 默认 0。⛔ 原来写 1（那时有 3 档），
+        #   留1 会在只有 1 个元素时**启动就 IndexError**。
+        self.night_idx = 0
         self.room = Room(NIGHTS[self.night_idx])
         self.luna = Luna(NEST_X0 + 70, FLOOR_Y, sneak_ok=self._can_play("sneak"))
         self.mw = Microwave(NIGHTS[self.night_idx])
@@ -1454,6 +1797,18 @@ class NightWindow(QWidget):
         _bgp = os.path.join(GAME_ASSETS, "scene_bg.png")
         _bg = QImage(_bgp) if os.path.isfile(_bgp) else QImage()
         self.bg_img = None if _bg.isNull() else _bg
+        # ⭐⭐ 2026-10-05 PR-03：三张 1280 切片（scene_bg_0/1/2.png）。
+        #   ⚠️ BG-02b 的G1 已判废，切片**目前还不存在** ⇒ 这里做**渐进降级**：
+        #     3张齐 → 用切片拼；不齐 → 用旧的 scene_bg.png 画在 x=0（其余区渐变）。
+        #   ⛔ 绝不能因为图没到就白屏/崩 —— 美术件的到位时间不该阻塞玩法。
+        self.bg_slices = []
+        for _i in range(3):
+            _p = os.path.join(GAME_ASSETS, "scene_bg_%d.png" % _i)
+            _im = QImage(_p) if os.path.isfile(_p) else QImage()
+            self.bg_slices.append(None if _im.isNull() else _im)
+        print("[夜间] 背景切片 %d/3 张%s"
+              % (sum(1 for s in self.bg_slices if s is not None),
+                 "" if all(self.bg_slices) else "（不齐 ⇒ 回退单图 scene_bg.png）"))
         # ⭐ 场景分件贴图（派单 40v3）：吊柜 / 料理台 / 桌布 / 挂毯。餐桌按裁决走程序绘制。
         self.sparts = {}
         for _k in ("cabinet", "counter", "cloth", "towel"):
@@ -1469,11 +1824,28 @@ class NightWindow(QWidget):
         self._was_over = False       # 越界旁白只在她【跨过去那一下】说
         self._was_seen = False       # 被发现的旁白同理，不逐帧刷屏
 
+        # ---- 🎵 音频（PR-03 第三批）----
+        # ⛔ 2026-10-05 Ronny「环境音不要了」⇒ **开窗不再起环境音循环**。
+        #   ⛔ 别加回来 —— 那条环境音素材已连同增益表项一起删除，
+        #   加回来会让 Audio 每开机找一次不存在的文件、报一条错。
+        #   ⇒ 现在**没有任何循环底噪**，只有 BGM（在 start_night 里起）。
+        self.snd = _make_audio(self)
+        if self.snd is not None and not self.snd.ok:
+            # ⛔ 加载失败要**看得见**：素材没进包 / 文件坏了 / 插件漏了，三种都长这样。
+            print("[夜间] ⚠️ 音频有缺失，见上面的 [音频] 报错（游戏可继续，将部分无声）")
+        # ⭐ 离开窗口必须停掉还在响的东西（BGM 等）—— ⛔ 否则退出了还在响。
+        self.destroyed.connect(self._on_destroyed)
+
         # ---- 循环 ----
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(16)
         self._last = None
+
+    def _on_destroyed(self):
+        """窗口销毁：停音频。⛔ 不断的话进程退不出（QSoundEffect 持有音频线程）。"""
+        if getattr(self, "snd", None) is not None:
+            self.snd.stop_all()
 
     # ------------------------------------------------------------ 输入
     def keyPressEvent(self, ev):
@@ -1526,7 +1898,11 @@ class NightWindow(QWidget):
                 d = -1
             elif self.keys & {Qt.Key_Right, Qt.Key_D}:
                 d = 1
-            self.luna.try_dash(d)
+            # 🎵 冲刺声。⭐ 用 `try_dash` 的**返回值**判（冷却中/攻击三段中都会返回
+            #   False）⇒ 冲刺没起手就不响，不会"按了键没反应却有声音"。
+            #   ⛔ 别在这里无条件播 —— 那会让冷却期的狂按变成机关枪。
+            if self.luna.try_dash(d) and self.snd is not None:
+                self.snd.play("sfx_dash")
 
     def keyReleaseEvent(self, ev):
         self.keys.discard(ev.key())
@@ -1537,6 +1913,10 @@ class NightWindow(QWidget):
         self.night_idx = idx
         self.room = Room(cfg)
         self.luna = Luna(NEST_X0 + 70, FLOOR_Y, sneak_ok=self._can_play("sneak"))
+        # ⭐ PR-06：把「落地」这个事件接给音频。
+        #   ⛔ Luna 自己不碰 audio（它拿不到窗口，同 `sneak_ok` 的纪律），
+        #     由窗口注入一个回调，物理层只在正确的那一帧喊一声。
+        self.luna.on_land = self._on_luna_land
         self.mw = Microwave(cfg)
         self.phase = "play"
         self.phase_t = 0.0
@@ -1551,8 +1931,34 @@ class NightWindow(QWidget):
         self._was_over = False
         self._was_seen = False
         self._narrate("enter", [idx])
+        # ⭐ 潜行 BGM：进档就起，loop=True。
+        #   ⛔ 换档要重起（同一实例改loopCount 不等于换曲子）⇒ 先停再起。
+        #
+        # ⭐⭐ 2026-10-06 PR-05：白天/夜间两套 BGM。
+        #   ⚠️ **当前 `NIGHTS` 只剩一档、名字叫「正午」**（见上面 510-524的裁决）
+        #      ⇒ 白天关卡就是它。而这里原本起的是**夜间** BGM `bgm_steal`，
+        #      ⇒ 设定与音频对不上。
+        #   ⇒ 按关卡名分流：`is_day` 为真起 `BGM_DAY_LOOP`（= A 案预拼的无缝循环件），
+        #      否则起 `bgm_steal`。⛔ `bgm_steal` 的起播逻辑**一个字都没删**，
+        #      夜间档（或以后新增的夜档）照样走原路径。
+        #   ⏳ 「白天关卡要不要也叠夜间 BGM」**待 Ronny 拍板**（team-lead 倾向不叠）。
+        #      现在的实现是**不叠**（二选一），⛔ 别自己改成叠加。
+        #⭐ 白天 BGM 要用哪一条：⛔ 逻辑在模块级 `_level_bgm_name()` 里
+        #   （`start_night` 与"押送回窝结束"两处共用一份，见该函数注释）。
+        day_bgm = _level_bgm_name(cfg)
+        if self.snd is not None:
+            #⭐ PR-05：停掉**全部** bgm_*（白天 + 夜间两套共存 ⇒ 枚举停，别列举）
+            _stop_level_bgm(self.snd)
+            if day_bgm:
+                #⭐ 白天 BGM：起的是**离线预拼的无缝循环件**，⛔ 不是源件
+                #   （源件硬切会有 14~29 dB 的接缝台阶 —— 实测，见 `audio.py` BGM_DAY_LOOP）
+                self.snd.loop(day_bgm)
+            else:
+                #⭐ 夜间 BGM：原逻辑，⛔ 一行没改
+                self.snd.loop("bgm_steal")
         print(f"[夜间] 开局：{cfg['name']}　赃物 {len(self.room.stashes)} 样"
-              f"　边界 x={cfg['border_x']:.0f}　追速 {cfg['chase_speed']:.0f}")
+              f"　边界 x={cfg['border_x']:.0f}　追速 {cfg['chase_speed']:.0f}"
+              f"　BGM {'白天 ' + day_bgm if day_bgm else '夜间 bgm_steal'}")
 
     def _load_game_frames(self):
         """读 assets_game/ 的帧序列。它们不走 core.load_frames（那里只管桌宠包）。"""
@@ -1662,6 +2068,12 @@ class NightWindow(QWidget):
         #    再用它决定要不要引燃 frenzy —— 两处共用一个 k，避免口径漂移。
         heard = self.mw.hear_strength(float(st["x"]), st["noise"])
         self._make_noise(float(st["x"]), st["noise"])
+        # 🎵 拿容器的声音：**按 kind 选**（loose/plate/jar 三档各有自己的音）。
+        #   ⭐ 放在 _make_noise 之后、判fury 之前 —— 三个分支（进frenzy/ 没进 / 攻击拿）
+        #   都要听到这一声，所以不能塞进任何一个分支里。
+        #   ⛔ 别按容器**离微波炉多远**改音量（那是玩法信息，会变成"听得见的距离"）。
+        if self.snd is not None:
+            self.snd.sfx_pick(kind)
         if st.get("fury"):
             # ⭐⭐ 破罐 → 疯狂追踪。注意用的是**容器位置**而不是露娜位置：
             #   守卫该冲向"炸响的地方"，这是玩家能听见、能预判、能绕开的信息。
@@ -1686,6 +2098,10 @@ class NightWindow(QWidget):
         l = self.luna
         if l.atk_hit_done or not l.in_atk_window():
             return
+        # 🎵 挥击声。⭐ 放在**结算之前**（不是"打中才响"）——
+        #   挥空也该有反馈音，否则玩家分不清"没打中"和"没出手"。
+        if self.snd is not None:
+            self.snd.play("sfx_attack")
         # ⭐ 判定是**身前单向**：|dx| <= ATK_REACH 且方向一致
         #   （⛔ 别用圆形范围 —— 那意味着她能打到背后，潜行的"绕后"就没意义了）
         hit_any = False
@@ -1743,6 +2159,12 @@ class NightWindow(QWidget):
         self.keys -= QTE_MOVE_KEYS
         self.luna.vx = 0.0
         self._say("撬一下……")
+        # ⛔ 2026-10-05 Ronny「冰箱音效**彻底移除**」⇒ 这里曾播 sfx_fridge_open，
+        #   现已连同素材一起删除（`assets_audio/` 下也没有了）。
+        #   ⛔ 别把它加回来 —— QTE 仍有 `sfx_qte_tick`（每按键）与 `sfx_qte_fail`
+        #   提供反馈，**开冰箱那一下是静音的**，这是有意的。
+        #   ⛔ 别动下面这行 `_make_noise`：**守卫听觉**与**玩家听觉**是两套系统，
+        #   删音效不影响他听不听得见撬门声。
         self._make_noise(FRIDGE["x"], NOISE_MAX * 0.55)   # 撬门本身有点响（比敲容器轻）
 
     def _qte_step(self, key):
@@ -1750,6 +2172,10 @@ class NightWindow(QWidget):
         q = self.qte
         if not q:
             return False
+        # 🎵 QTE 每按一下都响。⛔ 用 008 版（0.08s那条）——
+        #   0.48s 那条在 0.95s 的时限里会盖住下一个键的反馈。
+        if self.snd is not None:
+            self.snd.sfx_qte_tick()
         if key == q["seq"][q["got"]]:
             q["got"] += 1
             q["t"] = 0.0
@@ -1777,6 +2203,9 @@ class NightWindow(QWidget):
     def _qte_fail(self):
         self.qte = None
         self.qte_flash = 0.4
+        # 🎵 QTE 失败
+        if self.snd is not None:
+            self.snd.play("sfx_qte_fail")
         # ⛔ 惩罚是"微波炉警觉 + 噪音"，⛔ 不是直接失败/丢命（玩法文档：惩罚要轻）
         self.mw.alert = min(1.0, self.mw.alert + QTE_FAIL_ALERT)
         self.mw.hear_x = FRIDGE["x"]
@@ -1784,6 +2213,16 @@ class NightWindow(QWidget):
             self.mw.state = "chase"
         self._make_noise(FRIDGE["x"], NOISE_MAX * 0.8)
         self._say("哐——！")
+
+    def _on_luna_land(self):
+        """露娜从空中落到实地（唯一的落地音入口，PR-06）。
+
+        ⭐ 由 `Luna.update` 的落点判定在「空中→地面」那一帧调用一次。
+        ⛔ **爬梯落地不进来**：爬梯那三处（爬到台面沿 / 爬到顶 / 爬到底）
+           各自把`on_ground` 置True 后直接返回，走不到这个落点分支。
+        """
+        if self.snd is not None:
+            self.snd.play("sfx_land")
 
     def _make_noise(self, x: float, strength: float):
         """一次声响。⭐ 强度按【与微波炉的距离】线性衰减，超出听觉半径他根本听不见。
@@ -1885,11 +2324,48 @@ class NightWindow(QWidget):
         }
         self.phase = "result"
         self.phase_t = 0.0
+        # 🎵 结算 sting。⭐ **只播一次**。
+        #   ⚠️ 旧版是"播完循环同一段" —— sting 换成 3.5 秒短件后，
+        #      那个循环每 3.5 秒重播一次，短动机很明显（设计端 2026-10-05 拍板改掉）。
+        #   ⭐ 面板**不限时**（玩家可以一直看）⇒ 面板上**只有这一声 sting**，
+        #      没有循环底音（原先的"降环境音当底音"那一路已随 PR-06 删干净）。
+        #   ⭐ 潜行 BGM 在这里让位：结算已经是"这一趟结束了"，两段音乐叠着会像没结束。
+        if self.snd is not None:
+            # ⭐ PR-05：白天 BGM 也要让位，⛔ 否则它在**不限时**的结算面板上继续响
+            _stop_level_bgm(self.snd)
+            self.snd.sting("bgm_win")
         self._narrate("finish" if left == 0 else "home")
         print(f"[夜间] 结算：带回 {n} 件（价值 {vsum}）剩 {left} 被抓 {self.caught_cnt} "
               f"用时 {self.night_t:.0f}s → {rank}（{self.result['score']}）")
 
     # ------------------------------------------------------------ 循环
+    def _step_cam(self, dt):
+        """⭐⭐ 2026-10-05 PR-03：横向镜头跟随。**只平移不缩放**。
+
+        规格（派单 §三，按图实现不自己发挥）：
+            want = clamp(露娜.x - 640, 0, 2560)
+            cam_x += (want - cam_x) * min(1.0, dt * CAM_X_LAG)
+
+        ⭐ 死区：露娜在 cam_x+640 ± CAM_X_DEAD 内移动 ⇒ **镜头一帧都不动**
+          （不是减速，是完全不动 —— 派单 §三明确要求）
+        ⛔ 不做预测式/前瞻式跟随：露娜急停时画面会往前甩一下，很廉价。
+
+        ⚠️ 独立成方法（不内联在 _tick 里）的理由：自测要能用**假时钟**逐帧驱动它，
+          offscreen 下真实 dt≈0.0001s，混在 _tick 里根本没法验「无跳变」。
+        """
+        want = self.luna.x - CAM_X_CENTER
+        want = 0.0 if want < 0.0 else (CAM_X_MAX if want > CAM_X_MAX else want)
+        # ⭐ 死区：完全不动
+        if abs(self.luna.x - CAM_X_CENTER - self.cam_x) < CAM_X_DEAD:
+            return
+        self.cam_x += (want - self.cam_x) * min(1.0, dt * CAM_X_LAG)
+        # ⛔ 收敛后必须**夹回**区间。指数逼近不会越界，但浮点会留下 2560.0000001
+        #   这种尾巴，而「cam_x ∈ [0,2560]」是硬验收线（逐帧断言 5000 帧）。
+        if self.cam_x < 0.0:
+            self.cam_x = 0.0
+        elif self.cam_x > CAM_X_MAX:
+            self.cam_x = float(CAM_X_MAX)
+
     def _tick(self):
         import time
         now = time.perf_counter()
@@ -1945,6 +2421,8 @@ class NightWindow(QWidget):
             # ⭐⭐ QTE 锁移动（第二道保险）：QTE 期间方向键只喂 QTE，不驱动移动。
             mv = self.keys - QTE_MOVE_KEYS if self.qte is not None else self.keys
             l.update(dt, mv, self.room)
+            # ⭐ PR-03：镜头必须在**角色位置更新之后**推进，否则会慢一帧。
+            self._step_cam(dt)
             # ⭐⭐ 攻击三段的推进 + 命中结算。
             #   ⭐ 这里是**唯一**推进 wind/act/rec 的地方（Luna.update 只做减速）——
             #     三段是状态机（wind→act→rec→cd），阶段转移必须有唯一的裁判。
@@ -1990,6 +2468,21 @@ class NightWindow(QWidget):
                 self.phase_t = 0.0
                 self.caught_cnt += 1
                 self.qte = None             # ⭐ 被抓时 QTE 必须作废（否则按键还在喂一个死 QTE）
+                # 🎵 被抓：mw_alert（他发现了）+ caught（她被逮住）+ sting（被抓底音）
+                #   ⚠️ 三条同时响是**故意的**：这是全局最戏剧的一帧，
+                #   压掉任何一条都会让"被抓"听起来像"普通事件"。
+                #   ⭐ BGM 要让位—— 不让的话潜行曲会盖住这三声。
+                #   ⭐ sting 走 `sting()` 而不是 `play()`：它保证只响一次、
+                #     不会在押送动画里被叠成第二层（旧的"降环境音当底音"已删）。
+                if self.snd is not None:
+                    #⭐ PR-05：⛔ 原先这里只停 `bgm_steal`，
+                    #   加了白天 BGM 之后会**漏停白天那条**（⛔ 它会盖住这三声）。
+                    #⭐⭐ 2026-10-06 BGM 起播修复：停完之后**必须重起**，
+                    #   否则这一局剩下的时间**永远没有 BGM**（见 hauled→play 那处）。
+                    _stop_level_bgm(self.snd)
+                    self.snd.play("sfx_mw_alert")
+                    self.snd.play("sfx_caught")
+                    self.snd.sting("bgm_caught")
                 self._narrate("caught")
 
         elif self.phase == "meowed":
@@ -2022,13 +2515,35 @@ class NightWindow(QWidget):
                 self.phase = "play"
                 self.phase_t = 0.0
                 self._say("被押送回窝了。这趟白干。")
+                # ⭐⭐ 2026-10-06 BGM 起播修复（verifier 实测挖出的既存bug）。
+                #   病征：`meowed` 分支里 `_stop_level_bgm()` 把这一档的 BGM 停了，
+                #   而**从 hauled 回到 play 的这条路径上没有任何地方重起它**
+                #   ⇒ 玩家被抓一次之后，这一局**剩下的时间永远没有 BGM**，
+                #     而且它**不报错、不崩、也没有任何自测会红**（没有判据守它）。
+                #   ✅ 修法：回到 play 的瞬间按同一份分流重起。
+                #   ⭐ 走 `_level_bgm_name()`（与 `start_night` 同一份逻辑），
+                #   ⛔ 别在这里再写一遍"白天起白天/夜里起夜里" ——
+                #     两处各写一份的代价就是本bug 本身。
+                #   ⚠️ 停在meowed 的那一声 `bgm_caught` sting 是**一次性**播放，
+                #      不在 `_loops` 里 ⇒ 这里重起**不会**把它叠成两层。
+                if self.snd is not None:
+                    _bgm = _level_bgm_name(NIGHTS[self.night_idx])
+                    if _bgm:
+                        self.snd.loop(_bgm)
+                    else:
+                        self.snd.loop("bgm_steal")
 
         # 动作推进
         a = l.pick_action()
         if a != l.act:
             l.act, l.t = a, 0.0
         act = self.pack.actions.get(a)
-        fps = GAME_FPS["run_carry"] if a == "run_carry" else (act.fps if act else 10.0)
+        # ⭐ GAME_FPS 优先（夜间覆盖），没配的才用桌宠动作自带的 fps。
+        #   ⛔ 别写反：`GAME_FPS.get(a, act.fps if act else 10.0)` ——
+        #   那样"配了但取不到"会静默回退到桌宠值，改了 GAME_FPS 却毫无反应，
+        #   那是最难查的一种"改了没生效"。
+        _fps = GAME_FPS.get(a)
+        fps = _fps if _fps is not None else (act.fps if act else 10.0)
         if a == "climb":
             # ⭐ 判据是 l.moving，不是 vy —— 爬梯时 vy 被强制清零，用 vy 会让动画永停。
             # ⭐ 下梯 = 同一个 climb 动作【倒着播】（t 递减），⛔ 不是把 sprite 上下翻转 ——
@@ -2046,25 +2561,34 @@ class NightWindow(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         p.scale(self.k, self.k)
 
-        self._draw_bg(p)
+        # ⭐⭐ 2026-10-05 PR-03：菜单态**不跟随**（她固定在窝里等着，镜头没意义）。
+        #   ⛔ 菜单不跟 = 玩家看不到"地图有多大"，但菜单本来就是选档界面。
         if self.phase == "menu":
+            self._draw_bg(p)
             self._draw_nest(p)
-            self._draw_luna(p)          # ⭐ 她在窝里等着，不是冻住的立绘
+            self._draw_luna(p)
             self._draw_menu(p)
             p.end()
             return
+
+        # ⭐⭐ 横向相机：世界坐标 → 视口坐标。**只平移不缩放**（缩放跟随会让
+        #   按 1cm=3.3px 算死的地形/跳跃/巡逻数值全部失效 —— 派单硬约束）。
+        #   ⛔ 背景在最底层**不进这个 translate**：它是固定在视口上的，
+        #      否则会出现"背景跟着一起滑、再叠加三层背景"的二次偏移。
+        p.save()
+        p.translate(-self.cam_x, 0.0)
         self._draw_zone(p)
-        # ⭐⭐ 背景板（派单 42 v3 美术件）：美术出的整图，含墙/地/家具/布/生活装饰。
-        #   画在最底层；它已经包含家具和布 → 程序绘制的平台/布全部跳过，
-        #   只保留需要动的层：冰箱门动画 / 容器 / 微波炉 / 角色 / HUD。
+        # ⭐⭐⭐ 背景板：3 张 1280 切片按 cam_x 选可见的那两张。
+        #   ⛔ 切片尚未回传（BG-02bG1 判废）⇒ 有几张画几张，绝不崩。
+        self._draw_bg_slices(p)
         if self.bg_img is not None:
-            p.drawImage(QRectF(0, 0, VW, VH), self.bg_img,
-                        QRectF(0, 0, self.bg_img.width(), self.bg_img.height()))
             self._draw_nest(p)
             self._draw_stashes(p)
             self._draw_fridge(p)
             self._draw_mw(p)
             self._draw_luna(p)
+            p.restore()
+            # ⭐ HUD 画在相机之外（固定在视口）—— 否则血条会跟着世界滑走
             self._draw_hud(p)
             if self.phase == "meowed":
                 self._draw_meowed(p, self.phase_t)
@@ -2078,6 +2602,7 @@ class NightWindow(QWidget):
         self._draw_stashes(p)
         self._draw_mw(p)
         self._draw_luna(p)
+        p.restore()
         self._draw_hud(p)
         if self.phase == "meowed":
             self._draw_meowed(p, self.phase_t)
@@ -2198,6 +2723,46 @@ class NightWindow(QWidget):
                    "R 重来这档　　1 2 3 换档　　Enter 回选档")
 
     # -- 背景 --
+    def _draw_bg_slices(self, p):
+        """⭐ 2026-10-05 PR-03：画三张背景切片（世界坐标 0 / 1280 / 2560）。
+
+        ⛔ **这里必须画「世界坐标」，不能画「视口坐标」。**
+           本方法在 `p.save(); p.translate(-cam_x, 0)` **之内**被调用，
+           外层那一次 translate 已经是"世界 → 视口"的**唯一**映射。
+           ⇒ 若在这里再写 sx = wx - cam_x，就是**减两次**（二次偏移，画面整体错 cam_x）。
+           ⭐ 与其它_draw_*（_draw_luna 等）保持一致：它们也都用世界坐标。
+        """
+        # ⭐ 画在最底层：先把整片世界铺满底色，避免切片之间的空隙透出黑底
+        p.fillRect(QRectF(self.cam_x, 0, VW, VH), QColor(18, 20, 34))
+        _any = False
+        for i, im in enumerate(self.bg_slices):
+            if im is None:
+                continue
+            _any = True
+            # 世界坐标里的左缘= i * VW；1:1 贴，不缩放。越界由 QPainter 裁掉。
+            p.drawImage(QRectF(i * VW, 0, VW, VH), im,
+                        QRectF(0,0, im.width(), im.height()))
+        if not _any and self.bg_img is not None:
+            # ⛔⛔ 切片一张都没有（BG-02e 长图未出）⇒ 用旧的单图**横向平铺**铺满整个世界。
+            #   ⚠️ **旧版只把它顶在世界最左（x=0）** ⇒ 镜头跟到 x>1280 就是**纯底色空白**，
+            #   Ronny 玩的时候会以为程序坏了（2026-10-05 阻塞项）。
+            #   ⭐ 为什么平铺而不是 `scaled()` 拉宽：那张图里有家具（茶几/台面/冰箱/吊柜），
+            #   横向拉宽 3 倍 ⇒ **家具被拉成 3 倍宽**，一眼假。
+            #   平铺则每段都是原尺寸 ⇒ 看不出变形（它本来就是"一整间厨房"的重复感）。
+            #   ⛔ 平铺的代价：x=1280 与 x=0 处会看到同一面墙/同一扇窗。
+            #   那比"空白"或"变形"都可用。
+            #   ⚠️ 2026-10-05 撤压暗后接缝**可能变得可见**（压暗时接缝被暗色藏了，
+            #   现在亮了就藏不住）—— 实机看一眼镜头走过 x=1280 时接缝明不明显。
+            _tw = self.bg_img.width()
+            if _tw <= 0:                      # ⛔ 兜底：0 宽会死循环
+                _tw = VW
+            # 从 cam_x 所在的那一段开始画，⛔ 只画视口内的段（省掉 3 倍无用绘制）
+            _i0 = int(self.cam_x // _tw)
+            _i1 = int((self.cam_x + VW) // _tw) + 1
+            for _i in range(_i0, _i1 + 1):
+                p.drawImage(QRectF(_i * _tw, 0, _tw, VH), self.bg_img,
+                            QRectF(0, 0, self.bg_img.width(), self.bg_img.height()))
+
     def _draw_bg(self, p):
         g = QLinearGradient(0, 0, 0, VH)
         g.setColorAt(0.0, QColor(18, 20, 34))
@@ -2246,15 +2811,21 @@ class NightWindow(QWidget):
         #   ⭐ 之前是从执行端出的 AI 废图取色（#2D3C4A 冷蓝灰 / #181E27 深蓝黑）——
         #      ⛔ 那张是模型想象的"夜晚厨房"，色相跟真实厨房**完全反着**，
         #         我还照着它把吊柜压暗 0.72（说"米白对比太强"）——双重错。
-        # ✅ 现在：**色相照实拍**（暖白 + 木色），**亮度整体压暗**（因为是半夜）。
-        #    压暗系数 ≈ 0.42：白天 #ECEDE8 → 夜里 #63635F 的暖灰白。
-        _D = 0.42
+        # ✅ 现在：**色相照实拍**（暖白 + 木色）。
+        # ⭐⭐ 2026-10-05 Ronny 20:44 改为「白天大中午偷」设定 ⇒ **撤掉压暗**。
+        #   旧值 0.42（白天 #ECEDE8 → 夜里 #63635F 的暖灰白）是**为半夜定的**，
+        #   白天设定下会把整个厨房拉暗 ⇒ 视觉上"还是晚上"，与设定冲突。
+        #   ⇒ `_D = 1.0` = **不压暗**，直接用实拍原色。
+        # ⛔ 只改 `_D` 这一个数 —— 下面 `dk(...)` 里的**具体色值本来就是实拍色相**，
+        #   ⛔ 别"顺便"调它们（那会把配色改回凭感觉）。
+        # ⏳ 若 Ronny 之后说"太亮/要暖调"，改 `_D` 成 0.85~0.95 即可，⛔ 别动色值。
+        _D = 1.0
         def dk(r, g, b):
             return QColor(int(r * _D), int(g * _D), int(b * _D))
         parts = self.sparts
         for i, (x0, y0, x1, y1) in enumerate(self.room.platforms):
             if i == 0:      # 地板：暖木色（实拍 #7D6A59）
-                p.setBrush(dk(125, 106, 89))                    # 夜里压暗后的木地板
+                p.setBrush(dk(125, 106, 89))                    # 白天的木地板
                 p.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
                 p.setPen(QPen(dk(152, 139, 123), 2))              # 墙脚线
                 p.drawLine(QPointF(x0, y0 + 1), QPointF(x1, y0 + 1))
@@ -2279,7 +2850,7 @@ class NightWindow(QWidget):
                 continue
             if i == 1:
                 # ⭐ 餐桌程序绘制：纯几何形（矩形台面 + 两条矩形腿），AI 画不准，程序画反而更准
-                #   配色照实拍木色：台面 #6B5B4B，夜里压暗
+                #   配色照实拍木色：台面 #6B5B4B，白天不压暗
                 p.setPen(Qt.NoPen)
                 p.setBrush(dk(107, 91, 75))                       # 木桌面
                 p.drawRect(QRectF(x0, y0, _pw, 16))

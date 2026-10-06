@@ -61,7 +61,7 @@ def chk(name, cond, info=""):
     print(f"  {'OK  ' if cond else 'FAIL'}  {name}{('   ' + info) if info else ''}")
 
 
-def fresh(night=1):
+def fresh(night=0):                # ⛔ 2026-10-05 三档合一档 ⇒ 默认 0
     w.start_night(night)
     l, mw = w.luna, w.mw
     l.x, l.y, l.vx, l.vy = 300.0, N.FLOOR_Y, 0.0, 0.0
