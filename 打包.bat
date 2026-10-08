@@ -10,7 +10,13 @@ setlocal
 cd /d "%~dp0"
 
 rem 运行环境（自带 PySide6 6.11.2 的那个解释器）
-set "PY=C:\Users\mercy\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
+rem   ⛔ 别写死绝对路径：既绑死本机用户名，又让公开仓库泄露本机目录结构。
+rem   ✅ 优先级：环境变量 PY  >  本机 .workbuddy 下的 python envs（自动探测）  >  PATH 上的 python
+rem      自动探测用 %USERPROFILE%，在本机解析到的就是原来那个解释器，行为不变。
+set "PY_OVERRIDE=%PY%"
+set "PY=python"
+if not "%PY_OVERRIDE%"=="" set "PY=%PY_OVERRIDE%"
+if "%PY_OVERRIDE%"=="" for /d %%D in ("%USERPROFILE%\.workbuddy\binaries\python\envs\*") do if exist "%%~fD\Scripts\python.exe" set "PY=%%~fD\Scripts\python.exe"
 
 if not exist "%PY%" (
     echo [x] 找不到解释器：%PY%
