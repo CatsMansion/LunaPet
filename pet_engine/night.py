@@ -29,7 +29,8 @@ import sys
 
 from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QRect
 from PySide6.QtGui import (QImage, QPixmap, QPainter, QColor, QPen, QBrush,
-                           QFont, QLinearGradient, QRadialGradient, QIcon)
+                           QFont, QLinearGradient, QRadialGradient, QIcon,
+                           QPolygonF)
 from PySide6.QtWidgets import QApplication, QWidget
 
 try:                                    # 包内导入 / 直接跑脚本 两种都支持
@@ -290,6 +291,43 @@ TERRAIN_JSON_VERSIONS = (TERRAIN_JSON_VERSION_V1, TERRAIN_JSON_VERSION_V2)
 #   [] / {}       = **显式设为空**（"这关一个容器都没有"）
 #   ⛔ 合并了就永远无法表达"故意清空" ⇒ 这是语义，不是便利性。
 OVERRIDE_KEYS = ("stashes", "fridge_foods", "spawn", "mw_patrol", "nest")
+
+# ---------------- PR13 · 编辑器 5 个新工具 ----------------
+# ⭐ 工具名 → 中文名 + 快捷键（键位派单 §2.1 已定死，⛔ 别撞 PR12 的 1~6/S/O/C/Z/Del/F2/F4）
+#⭐ 顺序 = 工具栏显示顺序 = 键位数字顺序（7/8/9/0/-），不是字典序
+#   （字典序会把 "-" 排到最前、"0" 排到 "9" 前面 ⇒ 工具栏和手对不上）
+EDIT_TOOLS = (
+    ("rect",       "矩形",   "4"),
+    ("line",       "直线",   "5"),
+    ("select",     "选择",   "6"),
+    ("food",       "食物",   "7"),
+    ("fridge",     "冰箱食物", "8"),
+    ("luna_spawn", "露娜起点", "9"),
+    ("mw_patrol",  "巡逻段", "0"),
+    ("nest",       "窝区",   "-"),
+)
+# ⭐ 键 → 工具。⛔ 显式建表而不是 `if k == Key_7: ...` 一路if：
+#   那样漏一个键位根本看不出来（正是 PR13 半改时被漏掉的原因）。
+EDIT_TOOL_BY_KEY = {
+    Qt.Key_4: "rect", Qt.Key_5: "line", Qt.Key_6: "select",
+    Qt.Key_7: "food", Qt.Key_8: "fridge",
+    Qt.Key_9: "luna_spawn", Qt.Key_0: "mw_patrol", Qt.Key_Minus: "nest",
+}
+# ⭐ 需要**拖一条水平线段**的工具（点一下没意义，必须有两端）
+EDIT_LINE_TOOLS = ("mw_patrol", "nest")
+# ⭐ 单实例工具（派单 §2.1）：再点一次 = 移动，不是新增
+EDIT_SINGLE_TOOLS = ("luna_spawn", "mw_patrol", "nest")
+# ⭐ 新放置食物的默认属性（派单 §2.2）
+DEFAULT_FOOD = {"icon": "yolk", "kind": "loose"}
+# ⭐ 三种地面容器的画法颜色（派单 §2.4「按 kind 三色区分」）
+#   ⛔ 不复用 _EDIT_COLOR（那是地形 solid/brittle/climb 的语义色）
+#     ⇒ 混用会让"红色的东西"到底是脆化地形还是 jar 食物说不清。
+FOOD_KIND_COLOR = {
+    "loose": (255, 214, 122),   # 暖黄=散落
+    "plate": (140, 226, 160),   # 绿=盘子里
+    "jar":   (150, 190, 255),   # 蓝=罐子
+}
+FOOD_KIND_CN = {"loose": "散落", "plate": "盘子", "jar": "罐子"}
 
 
 def platform_dicts(plats=None) -> list:
@@ -935,7 +973,46 @@ ATK_REACH    = 62.0
 ATK_DY       = 56.0
 # ⭐ 击退参数：够把他推开一段，但⛔ 不能推穿墙（clamp 会兜住）
 ATK_KNOCK    = 260.0
-ATK_STUN     = 0.45         # 硬直 0.45s ≈ 露娜能拉开 135px
+ATK_STUN     = 0.45         # 硬直 0.45s ≈露娜能拉开 135px
+
+# ============================================================================
+# PR14 · 攻击三档（点按 / 蓄力 1 / 蓄力 2）—— Ronny 2026-10-09 18:52 拍板
+# ============================================================================
+# ⛔⛔ **`ATK_HINT` 与 `ATK_CHARGE1` 必须是两个数**（0.30 vs 0.35）：
+#    0.30 = **视觉提示点**（粒子变红），0.35 = **出招判定点**。
+#    这 0.05s 就是给玩家的「看到红色了，再按一下就到第二档」的时间差。
+#    ⛔ 混用成一个阈值 ⇒ 出现"看到红了但松手没出招"的别扭手感（判据 ⑬ 专测这条）。
+ATK_HINT= 0.30            # 粒子由白转红
+ATK_CHARGE1     = 0.35           # 蓄力 1 出招
+ATK_CHARGE2     = 0.70           # 蓄力 2 出招
+# ⭐ 击退分档（Ronny 拍板 +20% / +30%）。⛔ 不覆写 ATK_KNOCK，只新增。
+ATK_KNOCK1     = 312.0           # = 260 × 1.2
+ATK_KNOCK2     = 338.0           # = 260 × 1.3
+# ⚠️⚠️ **Ronny 要我提醒的事（不改数值，只报）**：
+#   312 与 338 只差 **26px（8%）** ⇒ 蓄力 1 与蓄力 2 的**击退手感很可能分不出来**。
+#   ⇒ ⭐ **红/蓝粒子才是主要区分手段**，击退差距只是辅助。
+#   ⇒ ⛔ 若实测发现分不出来，⛔ 别自己拉大数值，回传报设计端。
+# ⭐ 档位编号（⛔ 别用 0/1/2 混着当充能秒数用）
+ATK_TAP, ATK_C1, ATK_C2 = 0, 1, 2
+# ⭐ 三档的击退查表：索引 = 档位号。⛔ 别在消费点写 if/else 挑常数。
+ATK_KNOCK_TABLE = (ATK_KNOCK, ATK_KNOCK1, ATK_KNOCK2)
+# ⭐ 特效生命周期（秒）。三档不同：档越高冲击越持久。
+FX_DUR = (0.16, 0.22, 0.30)
+# ⭐ 刀光弧数（三档）。Ronny：普攻 1 道、蓄力 2~3 道。
+FX_CLAW_N = (1, 2, 3)
+# ⭐ 刀光颜色（普攻 / 蓄力1 / 蓄力2）。蓄力 2 偏紫，与"蓝粒子"呼应。
+FX_CLAW_COLOR = ((235, 245, 255), (180, 240, 255), (236, 210, 255))
+# ⭐ 蓄力 2 的"炸开"冲击色（暖金，§3.4）
+FX_IMPACT_GOLD = (255, 205, 90)
+# ⭐⭐ 蓄力粒子的三阶段（派单 §3.4 表）
+#    (charge_t 下限, 颜色, 粒子数, 脉动幅度 px, 内圈半径 px)
+FX_CHARGE_STAGES = (
+    (0.00,           (235, 240, 245), 14, 1.0, 90.0),   # 聚拢中（白）
+    (ATK_HINT, (245, 95,  85),  14, 2.4, 70.0),   # 蓄力1 就绪（红）
+    (ATK_CHARGE2,     (95, 150, 245), 26, 4.0, 110.0),  # 蓄力2 就绪（蓝）
+)
+# ⭐ 效果列表上限（派单 §3.2：防连点刷屏）。超了丢最旧的。
+FX_MAX = 24
 # ⭐⭐ 攻击打**容器**与打**守卫**是两个结果，别混成同一个键：
 #   · 打守卫 = 击退 + 硬直（控场，不掉血 —— 他是"押送者"不是敌人）
 #   · 打容器 = 撬开/打翻，按容器类型给不同噪声
@@ -1051,31 +1128,43 @@ INVEST_RADIUS  = 30.0        # 多近算"到了"（小于就停 —— 到位判
 INVEST_HOLD    = 0.60# 触发记忆维持秒数（够他反应过来迈腿，又不至于赖着不走）
 
 
-# ⭐⭐ 2026-10-04 补 sneak / tease：
-#   ⛔ 漏了它们的后果是**静默兜底** —— 绘制处写的 `self.imgs.get(l.act) or self.imgs["idle"]`，
-#     拿不到帧就画 idle。所以「潜行」和「挥击」明明 pick_action 返回对了，画面上却是
-#     一张站姿死图（Ronny：「潜行没实装」「露娜还是不会攻击」同一根因）。
+# ⭐⭐ 2026-10-04 补 sneak：
+#   ⛔ 漏了它的后果是**静默兜底** —— 绘制处写的 `self.imgs.get(l.act) or self.imgs["idle"]`，
+#     拿不到帧就画 idle。所以「潜行」明明 pick_action 返回对了，画面上却是
+#     一张站姿死图（Ronny：「潜行没实装」同一根因）。
+# ⭐⭐⭐ **tease 已从这里移除（PR15，Ronny 2026-10-09：「tease 不应该在游戏里，
+#   只是在桌宠里」）**：攻击演出改用 `assets_game/attack/` + `attack_charge/`。
+#   ⛔ 别再把 attack 加进来 —— 它在 assets_game/（游戏专用），
+#      `NEED_ACTIONS` 只喂 `_load_needed(pack, ...)`，那是**桌宠 packs**。
+#      加进来 = 桌宠包里找不到它 = 又一次静默兜底画idle。
 NEED_ACTIONS = ["idle", "walk", "human_run", "jump", "fall", "climb", "land",
-                "sneak", "tease"]
+                "sneak"]
 
 # ---- 游戏专用素材（2026-10-03 派单 35 回传）----
 # ⭐ 放在 自研引擎/assets_game/，不进 packs/ —— 微波炉不是桌宠角色，不该进桌宠包。
 GAME_ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets_game")
-# ⭐ 夜间**覆盖**桌宠动作 fps 的地方。键= 动作名（与 `pick_action()` 返回值同名）。
-#   ⛔ 为什么需要它：`punch > 0` 时 `pick_action()` 返回 **"tease"**，
-#     而 tease 的 fps 来自 packs/luna（12.0）—— 那是**桌宠**定的，
-#     夜间冒险要用它播 8 个攻击姿态，12fps 只能"刚好卡线"（0.67s = 8.04 帧）。
-#   ✅ 提到 15.0 ⇒ 0.67s 能放 10.05 帧 ⇒ **8 姿态 + 2 帧余量**，
-#     模型出7 帧或 9 帧都不会砍掉关键姿态。
-#   ⭐ Ronny 2026-10-05 19:58 拍板「都改」。
-GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0, "tease": 15.0}
+# ⭐ 夜间**覆盖**桌宠动作 fps 的地方。键 = 动作名（与 `pick_action()` 返回值同名）。
+#   ⭐ 只列**游戏帧**槽（assets_game/）—— 桌宠动作的 fps 仍由 packs 自己的 anim 定，
+#     ⛔ 别往这里加桌宠动作名（加了也不会被用上，只会让下一个人以为它生效了）。
+# ⭐⭐⭐ PR15：`tease` 从这里**删掉**（Ronny：「tease 不应该在游戏里，只是在桌宠里」）。
+#   ⛔ 删它的真实原因不是"不好看"，是**大小问题**（`s` 乘错了）：
+#     tease 在 NEED_ACTIONS ⇒ 从桌宠 packs 加载 ⇒ 画布 640×640，
+#     乘 s 之后角色高约 501px，而游戏帧是归一化后的 canvas 178（本体 132）
+#     ⇒ **大 3.8 倍**。根因是**两张画布走了两条不同的缩放路径**，
+#     不是数值没调好（详见 `_draw_luna` 里 attack 分支的注释）。
+#   ⛔ 原来那段「15fps 是为 8 个攻击姿态」的注释（PR15 前）已随 tease 一起失效，
+#     **已删除** —— 留着会误导下一个读代码的人去给桌宠动作调 fps。
+#   ⭐ attack / attack_charge 都是 24.0 = 16 帧 / 0.667s，与 run_carry 同节奏。
+GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0,
+            "attack": 24.0, "attack_charge": 24.0}
 # ⭐ 素材的**原始朝向**（+1 朝右 / -1 朝左），实测自素材本身，不是猜的：
 #   mw_walk 素材朝左（能看到侧脸和制服前襟，尾巴在右后）→ -1
 #   run_carry 素材朝右（脸朝右，鱼在右边的嘴里）    → +1
+#   attack / attack_charge 素材朝右（PR15，与 run_carry 同源同朝向）→ +1
 # ⛔ 之前写 `if face < 0: mirror` —— 那只在"素材朝右"时才碰巧正确。
 #   微波炉素材朝左，所以它 face=1（该朝右）时**没被镜像**，等于拿屁股对着玩家（Ronny 实机反馈）。
 #   ✅ 改成"和素材原始朝向不一致才镜像"，两套素材共用一条规则。
-GAME_SRC_FACE = {"mw_walk": -1, "run_carry": 1}
+GAME_SRC_FACE = {"mw_walk": -1, "run_carry": 1, "attack": 1, "attack_charge": 1}
 
 # ============================================================================
 # ①之二、三档夜晚（2026-10-03）
@@ -1301,6 +1390,13 @@ class Luna:
         self.climb_down = False # 下梯（用于把 climb 帧上下翻转）
         self.sneak = False      # 潜行中
         self.punch = 0.0        # ⭐ 挥击中（敲容器瞬间播爪的动作），>0 时优先于移动动作
+        # ============ PR14 · 攻击三档 ============
+        # ⭐ 蓄力中（按住 J 未达阈值）。⛔ 它是**表现层状态**，
+        #   不是攻击计时 —— 真正的三段计时还是 atk_wind/act/rec。
+        self.charging = False
+        self.charge_t = 0.0          # 已蓄力秒数（0 ~ ATK_CHARGE2 封顶后锁住）
+        self.atk_lvl = ATK_TAP# 本次出招的档位 0/1/2（决定击退与特效）
+        self.atk_fired = False        # ⭐ 本次按住是否已出招（防连放，判据 ⑤）
         # ⭐ 跳键闩锁：必须【松开再按】才能再跳。
         #   没有它的话按住 W 会落地即起跳一路连跳（实测踩上台面后立刻弹到 y=379），
         #   爬梯到顶也会自动弹一下 —— 玩家会觉得"我没让它跳"。
@@ -1399,8 +1495,10 @@ class Luna:
             self.vx *= 0.70
         elif self.atk_rec > 0.0:
             self.vx *= 0.86            # 后摇几乎还能动一点（不至于完全僵住）
-        # ⭐ punch 只是"播 tease 动作"的计时，与三段并行递减（它没有阶段转移，
-        #   所以放在这里减是对的）。⛔ 别把 punch 当攻击计时用 —— 它是表现层。
+        # ⭐ punch 只是"播挥击动作（attack / attack_charge）"的计时，与三段并行递减
+        #   （它没有阶段转移，所以放在这里减是对的）。
+        #   ⛔ 别把 punch 当攻击计时用 —— 它是表现层。
+        #   ⚠️ PR15：原文写的是「播 tease」，tease 已下线（只在桌宠里）⇒ 已更正。
         if self.punch > 0.0:
             self.punch = max(0.0, self.punch - dt)
 
@@ -1613,7 +1711,12 @@ class Luna:
         self._clamp_x(room)
         self.moving = abs(self.vx) > 1.0 or abs(self.vy) > 1.0
         if self.y > VH + 200:                            # 掉出世界（不该发生，兜底）
-            self.x, self.y = NEST_X0 + 70, FLOOR_Y
+            # ⭐⭐⭐ PR13：读 room.spawn_luna（Luna.update 拿不到 window，只能读 room）
+            #   ⛔⛔ **不做夹取**（Q13 裁定）：夹取要回答"哪里能站"，
+            #     那是把落地判定逻辑复制一遍，且会与 `_clamp_x` 打架。
+            #   ⭐ 默认 `room.spawn_luna = (NEST_X0+70, FLOOR_Y) = (80, 599)`
+            #     ⇒ 与旧写法 `NEST_X0+70, FLOOR_Y` **逐字相同**。
+            self.x, self.y = room.spawn_luna
             self.moving = False
 
     def _clamp_x(self, room):
@@ -1636,14 +1739,13 @@ class Luna:
         return None
 
     # ---- 技能 ---------------------------------------------------------
-    def try_attack(self) -> bool:
-        """起手一次攻击。返回是否成功起手。
+    def can_attack(self) -> bool:
+        """三道闸门能不能过？⇒ bool（⛔ 不产生任何副作用，纯查询）。
 
-        ⭐ 三道闸门，任一不满足就**静默拒绝**（不给提示）：
-          ① 冷却没转好   ② 已经在攻击中（三段任一段都在跑）
-          ③ 冲刺中（冲刺独占）
-        ⛔ 不检查"够不够得到目标" —— 那是命中窗口的事。
-          在这里判"够不到就不播"会让玩家按了没反应，以为按键坏了。
+        ⭐ PR14 把它从 `try_attack` 里**拆出来**是为了「按住 J 开始蓄力」时
+           也得先问一遍能不能攻击 —— 否则会出现「冷却中按住 J，
+           冷却转好后自动放招」这种玩家没主动按却打出的一招。
+        ⛔ 纯查询：⛔ 不许在这里动任何状态。
         """
         if self.atk_cd > 0.0:
             return False
@@ -1651,11 +1753,36 @@ class Luna:
             return False
         if self.dash_t > 0.0:
             return False
+        return True
+
+    def try_attack(self, lvl: int = ATK_TAP) -> bool:
+        """起手一次攻击。返回是否成功起手。
+
+        ⭐ 三道闸门，任一不满足就**静默拒绝**（不给提示）：
+          ① 冷却没转好   ② 已经在攻击中（三段任一段都在跑）
+          ③ 冲刺中（冲刺独占）
+        ⛔ 不检查"够不够得到目标" —— 那是命中窗口的事。
+          在这里判"够不到就不播"会让玩家按了没反应，以为按键坏了。
+
+        ⭐⭐ PR14 新增 `lvl`（0=普攻 / 1=蓄力1 / 2=蓄力2）：
+           ⛔ 默认值 ATK_TAP ⇒ **老调用方（`:3265` 原来的 `try_attack()`）
+              行为逐字不变** —— 这是「默认行为不变」的实现方式：
+              加参数而不改签名语义，别把默认值设成蓄力 2。
+           ⭐ 档位存进 `self.atk_lvl`，命中结算时按它取击退。
+        """
+        if not self.can_attack():
+            return False
+        _lv = int(lvl)
+        if _lv not in (ATK_TAP, ATK_C1, ATK_C2):
+            raise ValueError("攻击档位只能是 ATK_TAP/ATK_C1/ATK_C2，收到 %r" % (lvl,))
+        self.atk_lvl = _lv
         self.atk_wind = ATK_WIND
         self.atk_act = 0.0
         self.atk_rec = 0.0
         self.atk_hit_done = False
-        self.punch = ATK_WIND + ATK_ACT + ATK_REC   # ⭐ 复用 tease 动作当挥击演出
+        # ⭐ 命中帧才生成冲击特效 ⇒ 由窗口层在 `_resolve_attack_hit` 里 spawn，
+        #   这里**不生成**（普攻挥空不该有冲击波）。
+        self.punch = ATK_WIND + ATK_ACT + ATK_REC   # ⭐ 挥击演出的时长（PR15：动作是 attack/attack_charge，不再是 tease）
         return True
 
     def try_dash(self, dir_in: int) -> bool:
@@ -1664,6 +1791,14 @@ class Luna:
             return False
         # ⛔ 攻击三段期间不能冲刺（两个都是"决定"，不能同时做）
         if self.atk_wind > 0.0 or self.atk_act > 0.0 or self.atk_rec > 0.0:
+            return False
+        # ⭐⭐ PR14：**蓄力期间也不能冲刺**（判据 ⑭-7c 抓出来的真 bug）。
+        #   ⛔ 为什么必须挡：蓄力是一个"决定"（她正聚力），冲刺是另一个。
+        #     两者同时成立 = 玩家按住 J 再按 D 会"一边蓄力一边冲"，
+        #     蓄满后还在冲刺位移中出招 ⇒ 击退起点和她的位置错开，手感全乱。
+        #   ⚠️ 这条**不在**上面那三个检查里 —— 那三个查的是「已经出招」，
+        #     蓄力时atk_wind/act/rec 都还是 0 ⇒ 不加这条就会漏过去。
+        if self.charging:
             return False
         if dir_in == 0:
             dir_in = self.face
@@ -1681,11 +1816,23 @@ class Luna:
 
     # ---- 表现 ---------------------------------------------------------
     def pick_action(self):
+        # ⭐⭐⭐ PR15：攻击演出改走**游戏帧槽**（attack / attack_charge）。
+        #   ⛔ 原来这里返回 "tease"，而 tease 在 NEED_ACTIONS ⇒ 从桌宠 packs 加载
+        #     ⇒ 画布 640×640，乘 s 之后角色高约 501px（正常是 132px）⇒ **大 3.8 倍**。
+        #     这就是 Ronny 说的「大小问题又复发」的**根因**：不是数值没调好，
+        #     而是**两张画布走了两条不同的缩放路径**。
+        #   ⭐ 蓄力中也用 attack_charge：那段素材本身就是「拉弓 → 释放」，
+        #     蓄力时看到拉弓、命中时看到出招，**视觉上正好对应蓄力机制**。
+        #⛔ 别把 punch 顶起来当蓄力计时（punch 是"已出招"的计时，
+        #     拿它当蓄力指示会让出招时机算错—— PR14 已踩过这个坑）。
+        if self.charging:
+            return "attack_charge"
         # ⭐ 挥击优先（Ronny 10-03 反馈「露娜还是不会攻击」）：
         #   根因是 pick_action 只看移动状态 —— 她**站着不动**时按 E 根本不切动作。
-        #   ⛔ 而不是"没有挥击素材"（tease 已经装上了）。
+        #   ⛔ 而不是"没有挥击素材"。
         if self.punch > 0.0:
-            return "tease"
+            # ⭐ 蓄力 2 用 attack_charge（它含"释放"那一下），其余两档用 attack
+            return "attack_charge" if self.atk_lvl == 2 else "attack"
         # ⭐⭐ 冲刺表现（Ronny 10-04）：用 human_run —— 那是她全速跑的素材，
         #   语义上最接近"一口气冲出去"，⛔ 别用 sneak（那是慢的）。
         #   ⛔ 拿东西时**不**用 run_carry 播冲刺：那素材肩上有东西的姿势，
@@ -1713,6 +1860,62 @@ class Luna:
 # ============================================================================
 # ④ 执法者：微波炉
 # ============================================================================
+# ---------------------------------------------------------------------------
+# PR14 · Effect —— 一次性攻击特效的**唯一收口点**
+# ---------------------------------------------------------------------------
+# ⭐ 为什么单独一个类：攻击特效有三种（刀光/冲击/蓄力粒子），
+#   它们共享"进度 t: 0→1、播完就死"的语义 ⇒ 抽出来，
+#   ⛔ 别在 NightWindow 里散落五个 self.fx_xxx 变量 —— 那样移除逻辑要写五遍，
+#   漏一处就是特效永远留在屏幕上（内存泄漏 + 画面糊住）。
+#
+# ⭐⭐ `t` 是**归一化进度**（0~1），不是秒：
+#   因为三种特效的时长不同（FX_DUR 三档），画法全按 t 写才不用到处乘dur。
+#
+# ⚠️ `kind="charge"` 的特殊约定（派单 §3.4）：
+#   它是**持续**效果（按住 J 期间一直播），⛔ 不像 claw/impact 那样播完就死。
+#   ⇒ 它的 `t` **不是**自己的进度，而是**全局蓄力进度 charge_t**（由外部每帧写）。
+#   ⚠️ 阶段切换时⛔ 绝不重置它（否则粒子会跳一下）。
+class Effect:
+    """一次性攻击特效。⚠️ 每个实例只用一次（不复用），播完从列表移除。
+
+    ⭐ `__slots__`：攻击特效每帧可能新建多个实例（有 GC 压力），
+       不给实例配 `__dict__` 能省内存也省一点分配时间。
+    """
+    __slots__ = ("kind", "x", "y", "t", "dur", "facing", "r", "color",
+                 "lvl", "_dead")
+
+    def __init__(self, kind, x, y, dur, facing, r, color, lvl=ATK_TAP):
+        self.kind = kind      # "claw" | "impact" | "charge"
+        self.x = float(x)# 世界坐标
+        self.y = float(y)
+        self.t = 0.0          # 进度 0~1
+        self.dur = max(1e-6, float(dur))
+        self.facing = 1 if facing >= 0 else -1
+        self.r = float(r)     # 基础半径（按档位给不同的值）
+        self.color = color    # RGB 元组（不是 QColor：跨层传引用更省）
+        self.lvl = int(lvl)   # ⭐ 档位 0/1/2 —— 画法按档分（弧数/粒子数/颜色）
+        self._dead = False
+
+    def update(self, dt) -> bool:
+        """推进一帧。⇒ 还活着吗（False 就该被移除）。
+
+        ⭐⭐ **charge 是唯一不靠自己的 t 判死的**：
+           它按外部写入的 charge_t 决定阶段，由调用方在 charge 结束时移除。
+           ⇒ 这里对 charge 返回恒 True，否则按住 J 时粒子会在 0.30s 处凭空消失。
+        """
+        if self.kind == "charge":
+            return True
+        self.t += dt / self.dur
+        if self.t >= 1.0:
+            self.t = 1.0          # ⭐ 钉住：画法里要能用 t=1 收尾，不许溢出
+            self._dead = True
+            return False
+        return True
+
+    @property
+    def dead(self) -> bool:
+        return self._dead
+
 
 class Microwave:
     """⭐ 设定：它追露娜【不是】为了护着 koko，是为了维护秩序 ——
@@ -1721,8 +1924,18 @@ class Microwave:
     灰盒表现：一个深色方块 + 门缝里透出的一道橙光（朝向就是那一面）。
     """
 
-    def __init__(self, cfg: dict):
-        p0, p1 = cfg["patrol"]
+    def __init__(self, cfg: dict, patrol=None):
+        # ⭐⭐⭐ PR13：patrol 从参数进来，**不再直接读 cfg**。
+        #   ⛔⛔ 为什么要改（派单 §1.3）：
+        #     原来 `p0, p1 = cfg["patrol"]` ⇒ 起点 = 巡逻段中点。
+        #     若只把 self.x 设成 3000 而 patrol 还是 (760,1108)，
+        #     他一巡逻就走回去了 ⇒ **等于没改**。
+        #   ✅ 所以本单做「巡逻段」工具：p0/p1 由 room.mw_patrol 给，
+        #     起点自动 = 中点，两者**永远一致**（不可能脱节）。
+        #   ⭐ 默认 patrol=None ⇒ 落回 `cfg["patrol"]` ⇒ 与改动前**逐字相同**。
+        #   ⛔ `self.y = FLOOR_Y` 硬编码**本单不动**（派单 §1.3 明确）。
+        _pat = patrol if patrol is not None else cfg["patrol"]
+        p0, p1 = _pat[0], _pat[1]
         self.x = (p0 + p1) / 2
         self.y = FLOOR_Y
         self.face = 1
@@ -2289,12 +2502,20 @@ class Room:
     def platforms(self, value):
         self._platforms = sanitize_platforms(value, warn_prefix="Room.platforms")
 
-    def __init__(self, cfg: dict, custom=None):
+    def __init__(self, cfg: dict, custom=None, overrides=None):
         # ⭐⭐ PR12：`custom` 非 None 时用它当自定义地形层（list[dict]）。
         #   None ⇒ 完全走默认 PLATFORMS（**默认行为与改动前逐字一致**）。
+        # ⭐⭐⭐ PR13：`overrides` 是**独立参数（dict）**，不是把 custom 改成多态。
+        #   ⛔⛔ 为什么不用「custom 既能是 list 又能是 dict」（派单 §3.2的判断，我实测认同）：
+        #     出问题时**没法判断这次传的到底是哪种** ⇒ 判据会静默测错对象。
+        #     两处职责不同：custom = 地形（list）；overrides = 食物/起点/窝（dict）。
         self.custom = None
         self.platforms = platform_dicts(PLATFORMS) if custom is None \
             else platform_dicts(PLATFORMS) + sanitize_platforms(custom, "自定义地形")
+        # ⭐ overrides 的**原样副本**（编辑器要拿它导出 JSON，也给自测看"用户到底设了什么"）
+        #   ⛔ 必须**拷贝**：调用方若之后改了自己的 dict，room 里的不能跟着变。
+        self.overrides = dict(overrides) if overrides else {}
+        ov = self.overrides
         # ⭐⭐ PR12 · brittle 状态机（派单 §4.1）
         #   ⭐ 用 `id(plat)` 当键，**不用下标** —— 下标会随编辑器的增删漂移，
         #     漂了就变成"另一块地在消失"，这种 bug 极难查。
@@ -2334,10 +2555,20 @@ class Room:
         #   noise / fury / value / hit 全部**解算成实例上的字段** ——
         #   ⛔ 别在下游现查 KIND_TABLE[st["kind"]]：st["kind"] 可能被关卡数据覆盖，
         #   现查会让"这一局这个容器到底是什么档"变成隐式依赖，难排查。
+        # ⭐⭐⭐ PR13：自定义 stashes **必须走同一段解算**（派单 §1.1 硬要求）——
+        #   ⛔⛔ 另起一份解算 ⇒ 自定义食物的 noise/fury/value/hit 会与关卡食物不一致
+        #   ⇒ 同一档食物表现不同 ⇒ 极难查。
+        #   ⇒ 唯一的差别是**数据源**：下面把 `src` 选好，解算那段完全共用。
+        #⭐ null 语义（§4.1）：键缺失/None ⇒ 用 cfg；[] ⇒ **显式清空**。
+        _st_src = ov["stashes"] if ov.get("stashes") is not None else cfg["stashes"]
         stashes = []
-        for s in cfg["stashes"]:
+        for s in _st_src:
             kind = s.get("kind", "plate")
-            spec = KIND_TABLE.get(kind, KIND_TABLE["plate"])
+            # ⛔⛔ 白名单校验放这里（不只是编辑器）：导入路径也走这儿 ⇒ 一道闸
+            spec = KIND_TABLE.get(kind)
+            if spec is None:
+                raise ValueError("stashes.kind=%r 不合法（只能是 %s）"
+                                 % (kind, "/".join(KIND_TABLE.keys())))
             stashes.append(dict(
                 s, kind=kind,
                 noise=spec["noise"], fury=spec["fury"],
@@ -2345,9 +2576,29 @@ class Room:
                 taken=False, broken=False))
         self.stashes = stashes
         self.border_x = float(cfg["border_x"])     # ⭐ 允许区边界随档位变
-        self.mw_patrol = tuple(cfg["patrol"])
+        # ⭐⭐⭐ PR13：mw_patrol **激活它**（PR12 时它是死字段：只有写、没有读）。
+        #   ⛔⛔ 只改起点不改 patrol 是**没用的**——他巡逻一圈就走回原区间
+        #   （派单 §1.3）。所以本单做的是「巡逻段」，起点自动 = 中点，两者永远一致。
+        #   ⭐ 默认值 `tuple(cfg["patrol"])` ⇒ 与改动前逐字相同。
+        self.mw_patrol = (tuple(map(float, ov["mw_patrol"]))
+                          if ov.get("mw_patrol") is not None
+                          else tuple(cfg["patrol"]))
         # ⭐ 冰箱内容（每局重置）：QTE 成功才拿得到
-        self.fridge_left = [dict(f) for f in FRIDGE_FOODS]
+        #   ⭐⭐ PR13：自定义 fridge_foods 走同一份拷贝逻辑，仅数据源不同。
+        _ff_src = (ov["fridge_foods"] if ov.get("fridge_foods") is not None
+                   else FRIDGE_FOODS)
+        self.fridge_left = [dict(f) for f in _ff_src]
+        # ⭐⭐⭐ PR13 · 露娜起点（单实例）
+        #   ⛔⛔ **不做夹取**（Q13 裁定）：夹取要回答"谁能站"，那是把落地判定复制一遍，
+        #     复杂度不划算且会与 `_clamp_x` 打架。
+        #   ⭐ 所以起点允许放在空中（合法且有用：从吊柜开局）⇒ 她掉到地板即可。
+        _sp = ov.get("spawn")
+        self.spawn_luna = (tuple(map(float, _sp["luna"]))
+                            if _sp else (NEST_X0 + 70.0, float(FLOOR_Y)))
+        # ⭐⭐⭐ PR13 · 窝区（单实例），NEST_X0/X1 仍作默认值
+        _nest = ov.get("nest")
+        self.nest = (tuple(map(float, _nest))
+                     if _nest else (float(NEST_X0), float(NEST_X1)))
 
     # ---------------- PR12 · brittle 状态机（派单 §4.1） ----------------
     # ⭐ 三条正确写法（派单给判据，我给实现）：
@@ -2444,8 +2695,11 @@ class NightWindow(QWidget):
         #   留1 会在只有 1 个元素时**启动就 IndexError**。
         self.night_idx = 0
         self.room = Room(NIGHTS[self.night_idx])
-        self.luna = Luna(NEST_X0 + 70, FLOOR_Y, sneak_ok=self._can_play("sneak"))
-        self.mw = Microwave(NIGHTS[self.night_idx])
+        # ⭐⭐⭐ PR13：读 room.spawn_luna（默认 = (NEST_X0+70, FLOOR_Y)，逐字相同）
+        self.luna = Luna(self.room.spawn_luna[0], self.room.spawn_luna[1],
+                         sneak_ok=self._can_play("sneak"))
+        # ⭐⭐⭐ PR13：传 room.mw_patrol（**激活那个死字段**）
+        self.mw = Microwave(NIGHTS[self.night_idx], patrol=self.room.mw_patrol)
         self.keys = set()
         self.phase = "menu"          # menu | play | meowed | hauled | result
         self.phase_t = 0.0
@@ -2528,9 +2782,22 @@ class NightWindow(QWidget):
         #   ⛔ play_custom 必须有 —— 否则改完得重启才知道对不对（派单原话）。
         self.mode = "play"
         self.custom_terrains = []        # ⭐ 只放**自定义层**，默认 4 平台永远不进来
-        self.edit_tool = "rect"# rect | line | select
+        self.edit_tool = "rect"# rect | line | select | food | fridge
+                                            # | luna_spawn | mw_patrol | nest
         self.edit_kind = "solid"          # 当前要画的类型
-        self.edit_sel = -1                # 选中项在 custom_terrains 里的下标，-1 = 没选
+        self.edit_sel = -1                # 选中项在 custom_terrains 里的下标， -1 = 没选
+        # ⭐⭐⭐ PR13 · 五类可编辑对象的编辑器态（派单 §2.1）
+        #   ⭐ 全是 None = **不覆盖**（null 语义，§4.1）。
+        #   ⛔ 别把它们初始化成"默认值的副本"—— 那就分不清
+        #      「用户没设」与「用户设成了默认值」，而 §4.2 的导出 v1/v2 正是靠这个区分。
+        self.custom_stashes = None# list[dict] | None
+        self.custom_fridge = None         # list[dict] | None
+        self.custom_spawn = None          # tuple(x, y) | None
+        self.custom_patrol = None         # (p0, p1) | None
+        self.custom_nest = None           # (x0, x1) | None
+        # ⭐ 选中态：食物用 ("food", 下标) / 单实例用 ("spawn", -1) 之类
+        #   ⛔ 用元组而不是裸下标 —— 否则"第 3 个地形"和"第 3 个食物"分不清。
+        self.edit_sel_obj = None
         self._drag = None                 # 拖拽中：(x0,y0,x1,y1) 屏幕->世界
         self._drag_shift = False          # ⭐ 按下那一刻的 Shift 状态（直线轴对齐用）
         self._confirm_clear = False        # ⛔ 清空二次确认：按一下只提示，再按才真删
@@ -2538,6 +2805,220 @@ class NightWindow(QWidget):
         # ⭐ 存档路径（派单 §六 Q6「你定，报我」）—— 放在引擎根的 assets_game 下，
         #   ⛔ 不写进 dist/_internal（那是打包产物，重打包会被覆盖）。
         self.terrain_path = os.path.join(GAME_ASSETS, "custom_terrain.json")
+        # ============ PR14 · 攻击特效 ============
+        # ⭐ 特效列表挂在窗口上，⛔ **不用全局变量**（多窗口/重入会互相污染）。
+        self.fx = []
+
+    # ---------------- PR13 · overrides 汇总 ----------------
+
+    def _collect_overrides(self) -> dict:
+        """把编辑器的 5 类状态汇总成 `Room(overrides=...)` 要的 dict。
+
+        ⭐⭐ **None 一律不写进 dict** —— 这是 §4.1 null 语义的实现：
+           「键不在」= 不覆盖；`[]` = 显式清空。两者靠"键在不在"区分。
+        """
+        ov = {}
+        if self.custom_stashes is not None:
+            ov["stashes"] = [dict(s) for s in self.custom_stashes]
+        if self.custom_fridge is not None:
+            ov["fridge_foods"] = [dict(f) for f in self.custom_fridge]
+        if self.custom_spawn is not None:
+            ov["spawn"] = {"luna": tuple(self.custom_spawn)}
+        if self.custom_patrol is not None:
+            ov["mw_patrol"] = tuple(self.custom_patrol)
+        if self.custom_nest is not None:
+            ov["nest"] = tuple(self.custom_nest)
+        return ov
+
+    # ---------------- PR13 · 编辑器 · 5 类新对象的放置 / 删除 ----------------
+    #⭐ 统一入口：鼠标按下时按当前工具分派。
+    #   ⛔ 不写在 mousePressEvent 里 —— 那里已经装了 PR12 的拖拽/选中，
+    #      再堆 5 个分支会让"按下"这个动作变成一坨if。
+    def _edit_place(self, wx, wy) -> bool:
+        """按当前工具在 (wx,wy) 放置/移动对象。⇒ 是否改动了状态。"""
+        t = self.edit_tool
+        if t in ("rect", "line", "select"):
+            return False                # 这三个走PR12 的路径
+        if t == "food":
+            return self._edit_add_food(wx, wy)
+        if t == "fridge":
+            return self._edit_add_fridge(wx, wy)
+        if t == "luna_spawn":
+            return self._edit_set_spawn(wx, wy)
+        if t in EDIT_LINE_TOOLS:
+            # ⭐ 巡逻段/窝区要**拖**一条线，单击时 x1==x0 ⇒ 退化成一个点 ⇒ 拒。
+            #   真的放置在 mouseReleaseEvent 里做（那里才有两端坐标）。
+            return False
+        return False
+
+    def _edit_add_food(self, wx, wy) -> bool:
+        """放一个地面/台面容器。⇒ 是否成功。
+
+        ⛔⛔ 边界必须卡（派单 §2.3）：画到画面外 = 废数据，
+           而这份数据**会导出给下游生成脚本**，脏数据会一路走下去。
+        ⭐ 越界不抛异常、只返回 False + 给一行提示 ——
+           编辑器是交互式工具，抛异常会把整个游戏带崩。
+        """
+        x, y = float(wx), float(wy)
+        if not (0.0 <= x <= float(WORLD_W)):
+            return self._edit_refuse("食物要放在世界里（x 0~%d）" % int(WORLD_W))
+        if not (0.0 <= y <= float(FLOOR_Y)):
+            return self._edit_refuse("食物不能低于地板 y=%d" % int(FLOOR_Y))
+        self.edit_snapshot()
+        if self.custom_stashes is None:
+            self.custom_stashes = []
+        self.custom_stashes.append({"x": x, "y": y,
+                                    "icon": DEFAULT_FOOD["icon"],
+                                    "kind": DEFAULT_FOOD["kind"]})
+        # ⭐ 放完自动选中（派单 §2.2）—— 不选中就没法接着按 [ ] 改 icon
+        self.edit_sel_obj = ("food", len(self.custom_stashes) - 1)
+        self._apply_overrides_now()
+        self.update()
+        return True
+
+    def _edit_add_fridge(self, wx, wy) -> bool:
+        """放一个冰箱内食物。⇒ 是否成功。
+
+        ⛔⛔ x/y 必须落在冰箱矩形内（派单 §2.3）：
+           画在冰箱外 = 视觉上食物飘在墙上，玩家会以为游戏坏了。
+           冰箱坐标**不写死** —— 从 FRIDGE 常量读，跟着关卡数据走。
+        """
+        x, y = float(wx), float(wy)
+        fx0, fy = float(FRIDGE["x"]), float(FRIDGE["y"])
+        fx1 = fx0 + float(FRIDGE["w"])
+        fy0 = fy - float(FRIDGE["h"])
+        if not (fx0 <= x <= fx1):
+            return self._edit_refuse("冰箱食物要横向落在冰箱内（x %d~%d）"
+                                     % (int(fx0), int(fx1)))
+        if not (fy0 <= y <= fy):
+            return self._edit_refuse("冰箱食物要纵向落在冰箱内（y %d~%d）"
+                                     % (int(fy0), int(fy)))
+        self.edit_snapshot()
+        if self.custom_fridge is None:
+            self.custom_fridge = []
+        self.custom_fridge.append({"x": x, "y": y, "icon": DEFAULT_FOOD["icon"]})
+        self.edit_sel_obj = ("fridge", len(self.custom_fridge) - 1)
+        self._apply_overrides_now()
+        self.update()
+        return True
+
+    def _edit_set_spawn(self, wx, wy) -> bool:
+        """设露娜起点（单实例，再点即移动）。⇒ 是否成功。
+
+        ⭐⭐ **不夹取 y**（交接包 §4.3 Q13 裁定）：
+           夹取要回答"哪里能站"，那等于把落地判定逻辑复制一份，
+           而且会和 `_clamp_x` 打架。起点设在空中是**合法且有用**的
+           （可以做"从吊柜开局"），她掉到地板即可。
+           ⇒ 只做世界边界检查（防止放到画面外找不回来）。
+        """
+        x, y = float(wx), float(wy)
+        if not (0.0 <= x <= float(WORLD_W)):
+            return self._edit_refuse("起点要放在世界里（x 0~%d）" % int(WORLD_W))
+        if not (0.0 <= y <= float(FLOOR_Y)):
+            return self._edit_refuse("起点不能低于地板 y=%d" % int(FLOOR_Y))
+        self.edit_snapshot()
+        self.custom_spawn = (x, y)
+        # ⭐ 用工具名 "luna_spawn" 当选中标签（与 _edit_hit_obj / EDIT_SINGLE_TOOLS 同源）
+        self.edit_sel_obj = ("luna_spawn", -1)
+        self._apply_overrides_now()
+        self.update()
+        return True
+
+    def _edit_set_line(self, tool, wx0, _wy0, wx1) -> bool:
+        """设巡逻段 / 窝区（拖拽水平线段）。⇒ 是否成功。
+
+        ⭐ 形参是 `(tool, wx0, _wy0, wx1)` —— **与 `self._drag` 的四元组同序**，
+           调用方直接 `_edit_set_line(tool, *self._drag)` 即可，
+           ⛔ 不要写成 3 参数：调用点是`_edit_set_line(tool, x0, x1)`，
+           少传一个会得到「一个坐标当成两个用」的静默错位，
+           实测直接TypeError 才没酿成事故。
+        ⭐ y **一律忽略**（形参写成 `_wy0` 就是提醒"这个位置故意不用"）：
+           这两样只需要 x 区间。
+           ⛔ 不是偷懒 —— 微波炉 `self.y = FLOOR_Y` 是硬编码（他永远在地板上），
+              窝区判定也只比 x。存一个 y 进去就是废数据，还会误导下游脚本。
+        ⛔ p0 >= p1 ⇒ 拒（退化成点 = 无意义）。
+        """
+        a, b = sorted((float(wx0), float(wx1)))
+        if abs(b - a) < 4.0:
+            return self._edit_refuse("要拖出一条**有长度**的线段（现在几乎是点）")
+        if not (0.0 <= a and b <= float(WORLD_W)):
+            return self._edit_refuse("线段要完全落在世界里（0~%d）" % int(WORLD_W))
+        self.edit_snapshot()
+        if tool == "mw_patrol":
+            self.custom_patrol = (a, b)
+        else:
+            self.custom_nest = (a, b)
+        self.edit_sel_obj = (tool, -1)
+        self._apply_overrides_now()
+        self.update()
+        return True
+
+    def _edit_refuse(self, why: str) -> bool:
+        """拒绝一次放置：给一行提示，**不改任何状态**。⇒ 恒为False。
+
+        ⭐ 只提示不抛：编辑器的每次鼠标按下都会走到这里，
+           抛异常 = 点歪一下整个游戏崩掉。
+        """
+        self.msg, self.msg_t = why, 2.5
+        self.update()
+        return False
+
+    def _apply_overrides_now(self) -> None:
+        """把当前 overrides 立刻灌进 self.room（并让微波炉跟着走）。
+
+        ⭐⭐ **为什么必须有这个**：判定读的是 `self.room.*`，不是编辑器状态。
+           改了 `custom_stashes` 却不重建 room ⇒ 画面上没变、试跑也没变，
+           用户会以为功能坏了。PR12 的地形靠 `_edit_add` 每次重建，
+           这里必须同样对待 5 类对象。
+        ⭐⭐⭐ **微波炉必须一起挪**（实测踩到的真bug，判据 ⑮-6 抓出来的）：
+           `Microwave.__init__` 是按 patrol 中点算 x 的（`:1779`），
+           只换 room 不动 mw ⇒ `room.mw_patrol` 已经是 [2000,2400]，
+           而画面上的微波炉还站在老中点 ⇒ **试跑时他会自己走回老位置**，
+           也就是"巡逻段工具看起来没生效"。
+           ⛔ 这正是派单 §1.3 警告的坑：只改起点不改 patrol 等于没改。
+           ✅ 所以这里不重建整个对象（会丢 alert/state 等运行时状态），
+              只按新 patrol 重算他的**初始 x/y**。
+        ⭐ `mw` 可能还不存在（构造早期就调了本函数）⇒ getattr 兜底。
+        """
+        self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+                         overrides=self._collect_overrides())
+        _mw = getattr(self, "mw", None)
+        if _mw is not None:
+            _mw.x = (self.room.mw_patrol[0] + self.room.mw_patrol[1]) / 2.0
+            _mw.y = FLOOR_Y
+
+    def _edit_cycle_sel_prop(self, which: str) -> bool:
+        """`[` `]` 换选中食物的 icon；`,` `.` 换 kind。⇒ 是否改动了。
+
+        ⛔ 只作用于**选中**的食物（派单 §2.2「改选中项」而不是「改当前配方」）：
+           少一个编辑器状态，且符合"放→选中→调属性"的直觉。
+        ⛔ 循环里只在白名单内转（FOOD_ICONS / FOOD_KINDS）——
+           越界会让 `self.icons.get()` 取到 None ⇒ 绘制崩。
+        """
+        sel = self.edit_sel_obj
+        if not sel or sel[0] != "food":
+            return self._edit_refuse("先选中一个食物（用 6 选择工具点它）")
+        i = sel[1]
+        if self.custom_stashes is None or not (0 <= i < len(self.custom_stashes)):
+            return self._edit_refuse("选中的食物已不存在")
+        # ⭐⭐ 属性改动**也要进撤销栈**（派单 §3.3 的本意）。
+        #   ⛔ 快照存的是"改动前"的状态 ⇒ 所以**先拍快照再改**，
+        #   Ctrl+Z 才能把这次属性变更退回去。
+        self.edit_snapshot()
+        s = self.custom_stashes[i]
+        if which == "icon":
+            seq = list(FOOD_ICONS)
+            j = seq.index(s["icon"]) if s["icon"] in seq else 0
+            s["icon"] = seq[(j + 1) % len(seq)]
+        else:
+            seq = list(FOOD_KINDS)
+            j = seq.index(s["kind"]) if s["kind"] in seq else 0
+            s["kind"] = seq[(j + 1) % len(seq)]
+        self._apply_overrides_now()
+        self.msg, self.msg_t = ("选中食物：%s / %s"
+                                % (s["icon"], FOOD_KIND_CN.get(s["kind"], s["kind"]))), 2.0
+        self.update()
+        return True
 
     # ---------------- PR12 · 编辑器 · 状态切换 ----------------
 
@@ -2551,27 +3032,51 @@ class NightWindow(QWidget):
             raise ValueError("mode 只能是 play / edit / play_custom，收到 %r" % m)
         prev = self.mode
         self.mode = m
+        # ⭐⭐⭐ PR13：Room 一律带上 overrides（5 类对象的覆盖值）。
+        #   ⛔ `play` 模式**也要带** —— 否则 Ronny 在编辑态设好起点，
+        #   一切回 play 就回到 80（他以为设好了）。
+        #   ⭐ `overrides` 空 dict ⇒ Room 各字段取默认值 ⇒ 与改动前逐字相同。
+        _ov = self._collect_overrides()
         if m == "play":
             # 回正常游戏 ⇒ 用**默认**地形（自定义层不带进去）
-            self.room = Room(NIGHTS[self.night_idx])
-            self.luna.x, self.luna.y = NEST_X0 + 70, FLOOR_Y
+            self.room = Room(NIGHTS[self.night_idx], overrides=_ov)
+            self.luna.x, self.luna.y = self.room.spawn_luna
             self.luna.vy = 0.0
             self.luna.on_ground = True
         elif m == "play_custom":
             # ⭐ 用自定义地形试跑：编辑中的地形**立刻在画面上呈现**（派单 §3.2）
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains)
-            self.luna.x, self.luna.y = NEST_X0 + 70, FLOOR_Y
+            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+                             overrides=_ov)
+            self.luna.x, self.luna.y = self.room.spawn_luna
             self.luna.vy = 0.0
             self.luna.on_ground = True
         elif m == "edit":
             # 编辑态：地形常驻可见，但**不跑物理**（_tick 里按 mode 分流）
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains)
+            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+                             overrides=_ov)
         self.phase = "menu" if m == "edit" else self.phase
         self.update()
 
     def edit_snapshot(self) -> None:
-        """改动前存一份快照（撤销栈）。⭐ 每次改地形前必须调。"""
-        self._undo.append([dict(t) for t in self.custom_terrains])
+        """改动前存一份快照（撤销栈）。⭐ 每次改动前必须调。
+
+        ⭐⭐⭐ PR13：快照从「只有地形」扩成**6 类全存**
+          （派单 §3.3：否则 Ctrl+Z 只撤地形、撤不掉食物）。
+        ⭐ 存的是 None / list / tuple 的**原样**，所以"不覆盖"与"显式空"都能还原。
+        """
+        self._undo.append({
+            "terrains": [dict(t) for t in self.custom_terrains],
+            "stashes": None if self.custom_stashes is None
+            else [dict(s) for s in self.custom_stashes],
+            "fridge": None if self.custom_fridge is None
+            else [dict(f) for f in self.custom_fridge],
+            "spawn": None if self.custom_spawn is None
+            else tuple(self.custom_spawn),
+            "patrol": None if self.custom_patrol is None
+            else tuple(self.custom_patrol),
+            "nest": None if self.custom_nest is None
+            else tuple(self.custom_nest),
+        })
         if len(self._undo) > 64:              # ⛔ 别无限涨
             self._undo.pop(0)
 
@@ -2579,25 +3084,53 @@ class NightWindow(QWidget):
         """Ctrl+Z。⇒ True=撤销了一次，False=没得撤。"""
         if not self._undo:
             return False
-        self.custom_terrains = self._undo.pop()
+        snap = self._undo.pop()
+        self.custom_terrains = snap["terrains"]
+        self.custom_stashes = snap["stashes"]
+        self.custom_fridge = snap["fridge"]
+        self.custom_spawn = snap["spawn"]
+        self.custom_patrol = snap["patrol"]
+        self.custom_nest = snap["nest"]
         if self.mode in ("edit", "play_custom"):
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains)
+            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+                             overrides=self._collect_overrides())
         self.update()
         return True
 
+    # ---------------- PR13 · 清空 / 导出 / 导入 ----------------
+
     def edit_clear(self) -> None:
-        """清空全部自定义（调用方负责二次确认）。"""
+        """清空全部自定义（调用方负责二次确认）。
+
+        ⭐⭐⭐ PR13：地形 **+ 5 类新对象**一起清（交接包 §4.3 裁定）。
+           ⛔⛔ 为什么必须一起清：只清地形的话，用户按C 以为"全清了"，
+           结果食物还挂在台面上、窝还在老位置 —— **比不清更坏**
+           （他会以为是自己记错了，而不是有 bug）。
+        ⭐ 5 类新对象复位成 `None`（= 不覆盖，走关卡默认），
+           **不是** `[]`（= 显式清空）：「回到出厂」和「这关一个容器都没有」
+           是两件不同的事，不能混。
+        """
         self.edit_snapshot()
         self.custom_terrains = []
+        self.custom_stashes = None
+        self.custom_fridge = None
+        self.custom_spawn = None
+        self.custom_patrol = None
+        self.custom_nest = None
         if self.mode in ("edit", "play_custom"):
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains)
+            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+                             overrides=self._collect_overrides())
         self.update()
 
     def export_terrain(self, path=None):
         """导出 JSON（派单 §五 定死格式）。⇒ 实际写出的路径。"""
         p = path or self.terrain_path
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        data = terrain_to_json(self.custom_terrains)
+        # ⭐⭐⭐ PR13：必须传 overrides —— 不传的话 `terrain_to_json` 会走
+        #   「全 None ⇒ 导 v1 四键」分支，**用户在编辑器里放的食物会被丢掉**，
+        #   而且⛔ **不报错**（文件照样生成，只是少几个键）。
+        #   这就是「静默丢数据」：用户以为存下来了，重新打开是空的。
+        data = terrain_to_json(self.custom_terrains, overrides=self._collect_overrides())
         with open(p, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         return p
@@ -2606,15 +3139,33 @@ class NightWindow(QWidget):
         """导入 JSON ⇒ 地形条数。
 
         ⛔ 非法文件抛异常（不静默忽略）—— 静默 = 用户以为导入了，其实现地形没变。
+
+        ⭐⭐⭐ PR13：v1 / v2 都要能读。
+           ⛔⛔ `overrides_from_json(data)` 必须在**快照之后**调：
+              它会抛（白名单外的icon / 类型不对 / p0>=p1），
+              先快照再解析 ⇒ 解析失败时编辑器状态**一点没变**，
+              不会留下"快照被白白吃掉"的副作用。
+           ⛔ 漏掉这一句 = v2 文件里的 5 类字段被**静默丢弃**，
+              用户导入完发现食物没了、也不会有任何报错。
         """
         p = path or self.terrain_path
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
         ts = terrain_from_json(data)
+        ov = overrides_from_json(data)      # ⛔ 非法就抛，抛在改动之前
         self.edit_snapshot()
         self.custom_terrains = ts
+        # ⭐ v1 文件 ⇒ overrides_from_json 返回全 None 的 dict
+        #   ⇒ 5 类字段复位成 None（不是覆盖，是「回到关卡默认」），与 PR12 行为一致。
+        self.custom_stashes = ov.get("stashes")
+        self.custom_fridge = ov.get("fridge_foods")
+        _sp = ov.get("spawn")
+        self.custom_spawn = tuple(_sp["luna"]) if _sp else None
+        self.custom_patrol = ov.get("mw_patrol")
+        self.custom_nest = ov.get("nest")
         if self.mode in ("edit", "play_custom"):
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains)
+            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+                             overrides=self._collect_overrides())
         self.update()
         return len(ts)
 
@@ -2695,12 +3246,127 @@ class NightWindow(QWidget):
         return -1
 
     def _edit_del(self) -> bool:
+        # ⭐⭐ PR13：先看有没有选中**新对象**（起点/巡逻/窝/食物）。
+        #   ⛔ 顺序不能反 —— 新对象的删除是"恢复默认"，
+        #      拿旧的地形删除逻辑去处理会删错东西（或什么都不删）。
+        if self.edit_sel_obj and self._edit_del_obj():
+            return True
         if not (0 <= self.edit_sel < len(self.custom_terrains)):
             return False
         self.edit_snapshot()
         self.custom_terrains.pop(self.edit_sel)
         self.edit_sel = -1
-        self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains)
+        self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+                         overrides=self._collect_overrides())
+        self.update()
+        return True
+
+    # ---------------- PR13 · 命中测试 / 删除 ----------------
+
+    # ⭐ 点击判定半径（逻辑px）。⭐ 别设太小：食物就是个小方块，
+    #   半径给 14 相当于 34px 的命中圈，远大于视觉尺寸—— 编辑器要的是"好点中"，
+    #   不是"像素级精确"。
+    _EDIT_OBJ_HIT_R = 14.0
+
+    def _edit_hit_obj(self, wx, wy):
+        """点中新对象了吗？⇒ ("food", i) / ("fridge", i) / ("spawn",-1) / None。
+
+        ⭐⭐ **渲染顺序 = 命中顺序**（交接包 §4.3 裁定：
+        食物 → 冰箱 → 地形 → 起点/巡逻/窝，起点类最后画）。
+           ⛔ 命中测试必须**从后往前**判（先测最后画的那层），
+              否则"起点压在食物上"时点中的是下面那个食物 ——
+              用户看到起点在上面、点它却改食物，是最难查的一类"界面骗人"。
+        """
+        r = self._EDIT_OBJ_HIT_R
+
+        def _near(px, py):
+            return abs(float(px) - wx) <= r and abs(float(py) - wy) <= r
+
+        # ---- 第 1 层（最后画）：起点/ 巡逻段 / 窝区 ----
+        #⛔ 这三个都要**判 None**：用户还没设过时它是 None，
+        #   直接解包会TypeError（这正是 PR13 半改的坑）。
+        if self.custom_spawn is not None:
+            if _near(self.custom_spawn[0], self.custom_spawn[1]):
+                #⛔⛔ 返回 "luna_spawn"（**工具名**），不是 "spawn"（**JSON 键名**）。
+                #   这两个名字长得一样但不能混：`_edit_del_obj` 拿这个值去比对
+                #   EDIT_SINGLE_TOOLS（里面是 "luna_spawn"）⇒ 写成 "spawn"
+                #   会静默走进 else 分支，**删除什么都不发生、也不报错**。
+                #   ⚠️ 实测踩过：`("spawn",-1)` ⇒ _edit_del() 恒返回 False。
+                return ("luna_spawn", -1)
+        for nm, val in (("mw_patrol", self.custom_patrol),
+                        ("nest", self.custom_nest)):
+            if val is None:
+                continue
+            a, b = float(val[0]), float(val[1])
+            # ⭐ 线段命中：x 在 [a,b] 内，且 y 离线的y 够近。
+            #   ⛔ 巡逻段/窝区是**水平线段**，用户是横向拖出来的，
+            #      按"离线的竖直距离"判才符合直觉。
+            yline = (float(FLOOR_Y) if nm == "mw_patrol"
+                     else self._nest_draw_y())
+            if a - r <= wx <= b + r and abs(wy - yline) <= r:
+                return (nm, -1)
+        # ---- 第 2 层：食物 / 冰箱食物 ----
+        # ⛔ 从后往前（画在上面的先测）
+        if self.custom_fridge is not None:
+            for i in range(len(self.custom_fridge) - 1, -1, -1):
+                f = self.custom_fridge[i]
+                if _near(f["x"], f["y"]):
+                    return ("fridge", i)
+        if self.custom_stashes is not None:
+            for i in range(len(self.custom_stashes) - 1, -1, -1):
+                s = self.custom_stashes[i]
+                if _near(s["x"], s["y"]):
+                    return ("food", i)
+        return None
+
+    def _nest_draw_y(self) -> float:
+        """窝区在画面上占的**竖直中心 y**（命中测试用）。
+
+        ⛔⛔ 必须跟`_draw_nest` 的画法一致（:4577 `drawRoundedRect(x0, FLOOR_Y-26,
+           ..., 30)` ⇒ 占y ∈ [FLOOR_Y-26, FLOOR_Y+4]）。
+           ⚠️ 命中判据与画面判据不一致 = 最难查的一类 bug：
+              用户照着自己看到的窝点下去，却说"点不中"。
+        """
+        return float(FLOOR_Y) - 11.0
+
+    def _edit_del_obj(self) -> bool:
+        """删掉选中的新对象。⇒ 是否改动了。
+
+        ⭐⭐ **单实例对象（起点/巡逻/窝）的"删除"=恢复默认（置None）**，
+           不是"删了就没了"（派单 §2.1）。
+           ⛔ 为什么：`custom_spawn = None` 的语义是"不覆盖，用关卡默认"
+             （§4.1 的 null 语义）。若删掉就变成"永远没有起点"，
+             游戏会崩或走一个从没被设计过的分支。
+        """
+        sel = self.edit_sel_obj
+        if not sel:
+            return False
+        kind, i = sel
+        if kind == "food":
+            if self.custom_stashes is None or not (0 <= i < len(self.custom_stashes)):
+                return False
+            self.edit_snapshot()
+            self.custom_stashes.pop(i)
+            self.edit_sel_obj = None
+        elif kind == "fridge":
+            if self.custom_fridge is None or not (0 <= i < len(self.custom_fridge)):
+                return False
+            self.edit_snapshot()
+            self.custom_fridge.pop(i)
+            self.edit_sel_obj = None
+        elif kind in EDIT_SINGLE_TOOLS:
+            self.edit_snapshot()
+            # ⭐ 起点对应 `custom_spawn`（字段名去掉了 luna），其余同名
+            if kind == "luna_spawn":
+                self.custom_spawn = None
+            elif kind == "mw_patrol":
+                self.custom_patrol = None
+            else:
+                self.custom_nest = None
+            self.edit_sel_obj = None
+        else:
+            return False
+        self._apply_overrides_now()
         self.update()
         return True
 
@@ -2759,7 +3425,24 @@ class NightWindow(QWidget):
         # ⛔ 别把技能键塞进 self.keys —— 那是"持续按住"的键集，
         #   技能是**一次性触发**，混进去会被当成按住不放反复触发。
         elif k == Qt.Key_J:
-            self.luna.try_attack()
+            # ⭐⭐⭐ PR14：J **不再立即出招**，改为蓄力模型。
+            #   ⛔ 别在这里调 try_attack —— 那样"按住"和"点按"没区别。
+            #   ⭐ 按下只做两件事：记 charge_t=0、置 charging=True。
+            #   出招由两处触发：① `fx_tick` 里达到 ATK_CHARGE2（蓄满自动放）
+            #                ② `keyReleaseEvent` 里松手时按 charge_t 定档
+            # ⚠️ QTE **不吞 J**（实测：QTE 只吃方向键，见 keyPressEvent 的 QTE 分支）
+            #   ⇒ 蓄罐子时可以蓄力攻击 ⛔ 但那是既有行为，本单不改。
+            l = self.luna
+            # ⛔ 先问三道闸门：冷却/攻击中/冲刺中 → 按了没反应。
+            #   ⛔ 不 ask 就直接进charging ⇒ 会出现"冷却中按住 J，
+            #   冷却一好自动放招"这种玩家没主动按却打出的一招。
+            if l.can_attack() and not l.charging:
+                l.charging = True
+                l.charge_t = 0.0
+                l.atk_fired = False
+                # ⭐ 蓄力粒子**立刻**起来（白色聚拢），不等0.30s
+                self.fx_spawn("charge", l.x, l.y - 60.0, ATK_TAP,
+                              dur=9.9, r=90.0, color=(235, 240, 245))
         elif k == Qt.Key_K:
             # ⭐ 冲刺方向：读当前按着的左右键，没有就沿当前朝向
             d = 0
@@ -2774,6 +3457,26 @@ class NightWindow(QWidget):
                 self.snd.play("sfx_dash")
 
     def keyReleaseEvent(self, ev):
+        # ⭐⭐⭐ PR14：J 松手 = 蓄力结算的**第二个触发点**（派单 §4.2）。
+        #   charge_t < 0.35 ⇒ 普攻（点按）
+        #   已达到阈值      ⇒ ⛔ 什么都不做（招在达到阈值时就放出去了）
+        # ⚠️ 顺序很重要：⛔ 必须在 `self.keys.discard` **之前**读 charge_t ——
+        #   discard 只清键集不清 charge_t，但反过来写会让人以为这里依赖 keys。
+        if ev.key() == Qt.Key_J and self.luna.charging:
+            l = self.luna
+            if l.atk_fired:
+                # 已经放过招了（蓄满自动放的那一次）⇒ 只清蓄力态
+                self._fx_stop_charge()
+            elif l.charge_t < ATK_CHARGE1:
+                # ⭐ 点按 = 普攻。这条是「默认行为不变」的关键：
+                #   老版本按一下 J 立刻普攻，现在必须**还是**普攻。
+                self._fx_fire(ATK_TAP)
+            else:
+                # 0.35 ≤ charge_t < 0.70 ⇒ 蓄力 1
+                # ⚠️ 若 charge_t >= 0.70，fx_tick 早就自动放了并置 atk_fired，
+                #   所以能走到这里的只有 < 0.70。⛔ 不许在这里判"再升一档"。
+                self._fx_fire(ATK_C1)
+            return
         self.keys.discard(ev.key())
 
     # ---------------- PR12 · 编辑器 · 鼠标 ----------------
@@ -2793,8 +3496,23 @@ class NightWindow(QWidget):
                 #   垂直或水平」，所以中途松手不该改变这条线的画法。
                 self._drag_shift = bool(ev.modifiers() & Qt.ShiftModifier)
                 self._drag = (wx, wy, wx, wy)
+            elif self.edit_tool in EDIT_LINE_TOOLS:
+                # ⭐ 巡逻段/窝区：拖一条水平线段。单点不做事（退化成一个点）。
+                self._drag = (wx, wy, wx, wy)
+            elif self.edit_tool in ("food", "fridge", "luna_spawn"):
+                # ⭐ 点击即放置（单实例工具再点= 移动）。
+                #   ⛔ 不进self._drag —— 这些对象没有"两端"概念。
+                self._edit_place(wx, wy)
             else:
-                self.edit_sel = self._edit_hit(wx, wy)
+                # ⭐ select工具：⛔ 必须**先判新对象**再判地形，
+                #   否则 custom_stashes=None 时（还没放食物）会 AttributeError。
+                hit = self._edit_hit_obj(wx, wy)
+                if hit is not None:
+                    self.edit_sel_obj = hit
+                    self.edit_sel = -1
+                else:
+                    self.edit_sel_obj = None
+                    self.edit_sel = self._edit_hit(wx, wy)
                 self.update()
 
     def mouseMoveEvent(self, ev):
@@ -2818,8 +3536,18 @@ class NightWindow(QWidget):
             return
         x0, y0, x1, y1 = self._drag
         sh = self._drag_shift
+        tool = self.edit_tool
         self._drag = None
-        self._edit_add(x0, y0, x1, y1, line=(self.edit_tool == "line"), shift=sh)
+        # ⭐⭐ 三个分支各走各的：⭐ 顺序不能反 ——
+        #   EDIT_LINE_TOOLS 必须**先判**，否则"拖一条线段"会被当成 rect 画出一块地形。
+        if tool in EDIT_LINE_TOOLS:
+            # ⭐⭐ 顺序不能反 —— EDIT_LINE_TOOLS 必须**先判**，
+            #   否则"拖一条线段"会被当成 rect 画出一块地形。
+            #⭐ 用 `*self._drag` 解包（不是 `tool, x0, x1`）——
+            #   少传一个坐标会 TypeError，比"坐标错位到不知哪"好发现。
+            self._edit_set_line(tool, x0, y0, x1)
+        else:
+            self._edit_add(x0, y0, x1, y1, line=(tool == "line"), shift=sh)
 
     def mouseDoubleClickEvent(self, ev):
         if self.mode == "edit" and ev.button() == Qt.LeftButton:
@@ -2857,12 +3585,21 @@ class NightWindow(QWidget):
             self.edit_kind = "brittle"; return True
         if k == Qt.Key_3:
             self.edit_kind = "climb";   return True
-        if k == Qt.Key_4:
-            self.edit_tool = "rect";    return True
-        if k == Qt.Key_5:
-            self.edit_tool = "line";    return True
-        if k == Qt.Key_6:
-            self.edit_tool = "select"; return True
+        # ⭐⭐⭐ PR13：4/5/6 与 7/8/9/0/- 走**同一张表**（EDIT_TOOL_BY_KEY）。
+        #   ⛔ 不写成两段 if：PR13 半改时新键位就是因为"没人写"被整体漏掉，
+        #      一张表漏一个 key 一眼能看出来，八段 if 漏一个只能靠 grep 才发现。
+        if k in EDIT_TOOL_BY_KEY:
+            self.edit_tool = EDIT_TOOL_BY_KEY[k]
+            # ⭐ 换工具 ⇒ 旧选中态失效（否则在 select 工具下选的食物，
+            #    切到rect 再按 [ 还会改它 —— 那是"看不见的操作"）。
+            self.edit_sel_obj = None
+            self.edit_sel = -1
+            return True
+        # ---- PR13 · 属性调整（派单 §2.2）：[ ] 换 icon，, . 换 kind ----
+        if k in (Qt.Key_BracketLeft, Qt.Key_BracketRight):
+            self._edit_cycle_sel_prop("icon");  return True
+        if k in (Qt.Key_Comma, Qt.Key_Period):
+            self._edit_cycle_sel_prop("kind");  return True
         if k == Qt.Key_S:
             try:
                 self.export_terrain()
@@ -2894,12 +3631,17 @@ class NightWindow(QWidget):
         cfg = NIGHTS[idx]
         self.night_idx = idx
         self.room = Room(cfg)
-        self.luna = Luna(NEST_X0 + 70, FLOOR_Y, sneak_ok=self._can_play("sneak"))
+        # ⭐⭐⭐ PR13：读 room.spawn_luna。⛔ 这一处原来**漏改了**，
+        #   它是 start_night() ⇒ 每次开新一局都从这儿构造 Luna
+        #   ⇒ 只改 __init__ 的话，Ronny 设了起点 2000、
+        #   点「重新开始」就静默弹回80（不报错，只是位置不对）。
+        self.luna = Luna(self.room.spawn_luna[0], self.room.spawn_luna[1],
+                         sneak_ok=self._can_play("sneak"))
         # ⭐ PR-06：把「落地」这个事件接给音频。
         #   ⛔ Luna 自己不碰 audio（它拿不到窗口，同 `sneak_ok` 的纪律），
         #     由窗口注入一个回调，物理层只在正确的那一帧喊一声。
         self.luna.on_land = self._on_luna_land
-        self.mw = Microwave(cfg)
+        self.mw = Microwave(cfg, patrol=self.room.mw_patrol)
         self.phase = "play"
         self.phase_t = 0.0
         self.haul_t = 0.0
@@ -3017,7 +3759,7 @@ class NightWindow(QWidget):
                 self._qte_start()
             return
         # ⭐⭐ 在窝边且窝边有待结算的东西 → E = 结算（而不是敲容器）
-        if l.x < NEST_X1 + 40 and self.loot_stash:
+        if l.x < self.room.nest[1] + 40 and self.loot_stash:
             self._narrate("settle_now")
             self._settle()
             return
@@ -3034,7 +3776,7 @@ class NightWindow(QWidget):
            （Room 构造时已从 KIND_TABLE 解算），这里只负责执行。
         ⭐ jar 的 fury=True → 破它直接让守卫进入疯狂追踪（Ronny：
           「罐子改为一但破裂警卫会直接疯狂追踪」）。这是全场最响、最危险的一下。
-        ⭐⭐ 攻击取走 vs 键取走：只有**动画**不同（攻击已经在播 tease 了），
+        ⭐⭐ 攻击取走 vs 键取走：只有**动画**不同（攻击在播 attack，见 `pick_action`），
            代价**完全一样** —— 攻击不会比按 E 更安静。
            原因：攻击的价值是"打碎 + 顺手拿走 + 击退追兵"，不是"绕过噪声"。
            若给攻击减噪声，玩家就会全程用攻击，潜行这套就没了。
@@ -3070,6 +3812,79 @@ class NightWindow(QWidget):
             l.punch = 0.42                                # ⭐ 播"挠"的挥击动作
         self._narrate("steal")
 
+    # ---------------- PR14 · 攻击特效 ----------------
+
+    def fx_spawn(self, kind, x, y, lvl=ATK_TAP, dur=None, r=None, color=None):
+        """生成一个特效并挂进 `self.fx`。⇒ 那个 Effect。
+
+        ⭐⭐ **上限保护**：超过 `FX_MAX`(24) 就**丢最旧的**（派单 §3.2）。
+           ⛔ 为什么要这个：连点 J 会每帧生成刀光+冲击，不封顶的话
+           列表无限涨（内存泄漏）而且旧特效还留在屏幕上互相叠成一团糊。
+        ⭐ 只丢一个（`pop(0)`）而不是清空：一次多生成 2~3 个很正常，
+           丢一个就够腾出位置，全清会让玩家看到"特效突然消失"。
+        """
+        _dur = FX_DUR[int(lvl)] if dur is None else float(dur)
+        # ⭐ 半径按档位放大（派单 §3.4 的 r0）：档越高冲击范围越大。
+        _r = r if r is not None else (26.0 + 12.0 * int(lvl))
+        _col = color if color is not None else FX_CLAW_COLOR[int(lvl)]
+        e = Effect(kind, x, y, _dur, getattr(self.luna, "face", 1), _r, _col, lvl)
+        self.fx.append(e)
+        while len(self.fx) > FX_MAX:
+            self.fx.pop(0)
+        return e
+
+    def fx_tick(self, dt):
+        """推进全部特效 + 回收死掉的。⛔ 必须在每个 phase 的绘制之前都跑。
+
+        ⭐ 回收用列表推导一行搞定（派单 §3.2）：`update()` 返回 False 即该移除。
+        ⚠️ **蓄力粒子（kind="charge"）是持续的**，它的移除靠 `_fx_stop_charge`
+           在松手/出招时显式做——⛔ 不能靠 update 判死，否则按住 J 时
+           粒子会在 0.30s 处凭空消失。
+        """
+        l = self.luna
+        # ---- 蓄力推进（⛔ 必须在读 J 之前：先累加，再判阈值）----
+        j_held = Qt.Key_J in self.keys
+        if l.charging and j_held and not l.atk_fired:
+            # ⭐ 封顶在 ATK_CHARGE2：超过就锁住（判据 ⑤「按住 1.5s 只放一次」）
+            l.charge_t = min(ATK_CHARGE2, l.charge_t + dt)
+            if l.charge_t >= ATK_CHARGE2:
+                # ⭐⭐ 达到 2 档**立刻出招并锁定**（不再等松手）——
+                #   否则"按住不放永远不出招"是最糟的手感。
+                self._fx_fire(ATK_C2)
+        # ---- 回收 ----
+        if self.fx:
+            self.fx = [e for e in self.fx if e.update(dt)]
+
+    def _fx_fire(self, lvl:int):
+        """真正放一招（分档）。⇒ 是否成功起手。
+
+        ⭐ 这是**唯一**放招入口（普攻/蓄力1/蓄力2 都走它）⇒
+           档位相关的表现与数值**只在这里决定一次**，
+           ⛔ 别在别处再判一次档位（两处判必然漂移）。
+        """
+        l = self.luna
+        if not l.try_attack(lvl):
+            return False
+        l.atk_fired = True
+        self._fx_stop_charge()
+        # ⭐ 刀光在**出招瞬间**生成（跟着爪子轨迹，不是命中帧）
+        self.fx_spawn("claw", l.x + l.face * 30.0, l.y - 60.0, lvl)
+        # ⭐蓄力 2 的"炸开"冲击在**命中帧**才生成（见 _resolve_attack_hit）
+        return True
+
+    def _fx_stop_charge(self):
+        """结束蓄力态 + 清掉蓄力粒子。
+
+        ⭐ 出招 / 松手 / 进入别的情况都要走这里 —— ⛔ 别各自写一遍
+           `self.fx = [e for e in self.fx if e.kind != "charge"]`，
+           漏一处就有粒子永久挂在屏幕上。
+        """
+        self.luna.charging = False
+        self.luna.charge_t = 0.0
+        self.luna.atk_fired = False
+        if self.fx:
+            self.fx = [e for e in self.fx if e.kind != "charge"]
+
     def _resolve_attack_hit(self):
         """在攻击的**命中窗口**内结算一次。⛔ 每次攻击只结算一次（atk_hit_done）。
 
@@ -3092,9 +3907,19 @@ class NightWindow(QWidget):
         if (abs(l.x - mw.x) <= ATK_REACH + mw.w * 0.5
                 and abs(l.y - mw.y) <= ATK_DY
                 and (mw.x - l.x) * l.face >= -18.0):
-            mw.hit_by(l.x, ATK_KNOCK, ATK_STUN)
+            # ⭐⭐ PR14：击退按档位取（普攻 260 / 蓄力1 312 / 蓄力2 338）。
+            #   ⛔ **只改击退数值，不改作用对象**（实测全文件只有这一处
+            #   消费 ATK_KNOCK ⇒ 他一直是"击退微波炉"，不是击退露娜）。
+            #   ⛔ 别顺手也把容器那边改了：容器是"撬开"，没有位移。
+            mw.hit_by(l.x, ATK_KNOCK_TABLE[l.atk_lvl], ATK_STUN)
             hit_any = True
             self._say("啪！")
+            # ⭐ 冲击特效在**命中帧**生成（不是出招帧）——
+            #   挥空不该有冲击波，命中了才有"打到了"的实感。
+            _gold = (l.atk_lvl == ATK_C2)
+            self.fx_spawn("impact", mw.x, mw.y - 90.0, l.atk_lvl,
+                          r=(26.0 + 12.0 * l.atk_lvl) * (1.6 if _gold else 1.0),
+                          color=FX_IMPACT_GOLD if _gold else (255, 236, 200))
         # --- ② 容器 ---
         for st in self.room.stashes:
             if st["broken"] or st.get("scratched"):
@@ -3364,6 +4189,11 @@ class NightWindow(QWidget):
             return
 
         l, mw = self.luna, self.mw
+        # ⭐⭐ PR14：特效推进 + 蓄力判定。
+        #   ⭐ 位置很讲究：在 `edit` 早退**之后**（编辑态不跑特效），
+        #     在 `l.update` **之前**（蓄力累加要赶在这一帧的物理之前，
+        #     否则玩家松手判定会晚一帧）。
+        self.fx_tick(dt)
         # ⭐⭐ PR12：brittle 计时器每帧推进（③ 恢复）。
         #   ⛔ 放在物理之前：这样「这一帧踩上去」用的是本帧开始时的状态，
         #     不会出现"踩的同一帧就立刻恢复"的时间穿越。
@@ -3456,7 +4286,7 @@ class NightWindow(QWidget):
                 self._was_seen = False
 
             # ⭐⭐ 回宝 = 放下（暂存），**不结算**。结算要玩家在崭边主动按 E。
-            if l.x < NEST_X1 and l.carrying:
+            if l.x < self.room.nest[1] and l.carrying:
                 self.loot_stash.extend(l.carrying)
                 l.carrying = []
                 self._narrate("drop")
@@ -3497,7 +4327,7 @@ class NightWindow(QWidget):
             # ⭐ 押送演出：微波炉把露娜拎回窝（1.1 秒插值），不是瞬移
             self.haul_t = min(1.0, self.haul_t + dt / 0.9)
             e = self.haul_t * self.haul_t * (3 - 2 * self.haul_t)
-            tx, ty = NEST_X0 + 70, FLOOR_Y
+            tx, ty = min(self.room.nest[0] + 70, self.room.nest[1]), float(FLOOR_Y)
             x0, y0 = self.haul_from
             l.x = x0 + (tx - x0) * e
             l.y = y0 + (ty - y0) * e - math.sin(e * math.pi) * 60.0   # 拎起来的一点点抛物线
@@ -3563,7 +4393,9 @@ class NightWindow(QWidget):
         if self.phase == "menu":
             self._draw_bg(p)
             self._draw_nest(p)
+            self._draw_fx_behind(p)
             self._draw_luna(p)
+            self._draw_fx_front(p)
             self._draw_menu(p)
             # ⭐⭐ PR12 编辑态：**画在 menu 之后**（盖在上面），但镜头 translate 还没开始，
             #   所以要自己平移。地形必须**立即可见**（派单 §3.2 明确要求）。
@@ -3591,7 +4423,9 @@ class NightWindow(QWidget):
             self._draw_stashes(p)
             self._draw_fridge(p)
             self._draw_mw(p)
+            self._draw_fx_behind(p)
             self._draw_luna(p)
+            self._draw_fx_front(p)
             p.restore()
             # ⭐ HUD 画在相机之外（固定在视口）—— 否则血条会跟着世界滑走
             self._draw_hud(p)
@@ -3606,7 +4440,9 @@ class NightWindow(QWidget):
         self._draw_nest(p)
         self._draw_stashes(p)
         self._draw_mw(p)
+        self._draw_fx_behind(p)
         self._draw_luna(p)
+        self._draw_fx_front(p)
         p.restore()
         self._draw_hud(p)
         if self.phase == "meowed":
@@ -3673,6 +4509,126 @@ class NightWindow(QWidget):
             p.drawText(QPointF(xa + 4, ya - 4),
                        "%d × %d" % (int(xb - xa), int(yb - ya)))
 
+        # ---------------- PR13 · 5 类新对象 ----------------
+        # ⭐⭐ **渲染顺序 = 交接包 §4.3 裁定的顺序**（也是命中测试的逆序）：
+        #    食物 → 冰箱食物 → 地形 → 起点/巡逻/窝
+        # ⭐⭐⭐ **起点类必须最后画** —— 它是"关卡开局位置"，最需要永远可见；
+        #    若先画就会被自定义地形盖住，用户会以为没放成功。
+        self._draw_edit_foods(p)
+        self._draw_edit_fridge(p)
+        self._draw_edit_lines(p)
+        self._draw_edit_spawn(p)
+        # ---- 拖拽中的预览（巡逻段 / 窝区）----
+        if self._drag is not None and self.edit_tool in EDIT_LINE_TOOLS:
+            x0, _y0, x1, _y1 = self._drag
+            a, b = sorted((float(x0), float(x1)))
+            c = (150, 190, 255) if self.edit_tool == "mw_patrol" else (255, 170, 200)
+            yline = (float(FLOOR_Y) if self.edit_tool == "mw_patrol"
+                     else self._nest_draw_y())
+            p.setPen(QPen(QColor(c[0], c[1], c[2], 230), 2, Qt.DashLine))
+            p.drawLine(QPointF(a, yline), QPointF(b, yline))
+            p.setPen(QColor(c[0], c[1], c[2]))
+            p.setFont(QFont("Microsoft YaHei", 10))
+            p.drawText(QPointF((a + b) / 2 - 20, yline - 8),
+                       "%d" % int(b - a))
+
+    def _draw_edit_foods(self, p):
+        """地面/台面容器：小方块（按 kind 三色）+ icon 名（派单 §2.4）。"""
+        if not self.custom_stashes:
+            return
+        for i, s in enumerate(self.custom_stashes):
+            c = FOOD_KIND_COLOR.get(s["kind"], (200, 200, 200))
+            x, y = float(s["x"]), float(s["y"])
+            sel = (self.edit_sel_obj == ("food", i))
+            a = 255 if sel else 200
+            p.setPen(QPen(QColor(c[0], c[1], c[2], a), 3 if sel else 2))
+            p.setBrush(QColor(c[0], c[1], c[2], 90 if sel else 55))
+            p.drawRect(QRectF(x - 11, y - 11, 22, 22))
+            # ⭐ 名字标在下方：icon 名太长会盖住方块本体
+            p.setPen(QColor(c[0], c[1], c[2], a))
+            p.setFont(QFont("Microsoft YaHei", 9))
+            p.drawText(QPointF(x - 26, y + 26), s["icon"])
+
+    def _draw_edit_fridge(self, p):
+        """冰箱内食物：菱形（派单 §2.4「另一种形状」）。
+
+        ⭐ 形状必须与地面食物**明显不同** —— 两者都是"食物"，
+           只靠颜色区分在低分辨率下分不出来。
+        ⭐ 顺带把冰箱轮廓画出来：否则自定义食物放在冰箱外时，
+           用户根本不知道自己在往哪放。
+        """
+        fx0, fy = float(FRIDGE["x"]), float(FRIDGE["y"])
+        fx1, fy0 = fx0 + float(FRIDGE["w"]), fy - float(FRIDGE["h"])
+        p.setPen(QPen(QColor(120, 170, 220, 90), 1, Qt.DotLine))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(QRectF(fx0, fy0, fx1 - fx0, fy - fy0))
+        if not self.custom_fridge:
+            return
+        for i, f in enumerate(self.custom_fridge):
+            c = (150, 220, 255)
+            x, y = float(f["x"]), float(f["y"])
+            sel = (self.edit_sel_obj == ("fridge", i))
+            a = 255 if sel else 200
+            p.setPen(QPen(QColor(c[0], c[1], c[2], a), 3 if sel else 2))
+            p.setBrush(QColor(c[0], c[1], c[2], 90 if sel else 55))
+            # ⭐ 菱形 = 两个等腰三角形拼，Qt 没有 drawPolygon 简化写法
+            p.drawPolygon(QPolygonF([QPointF(x, y - 13), QPointF(x + 13, y),
+                                     QPointF(x, y + 13), QPointF(x - 13, y)]))
+            p.setPen(QColor(c[0], c[1], c[2], a))
+            p.setFont(QFont("Microsoft YaHei", 9))
+            p.drawText(QPointF(x - 26, y + 28), f["icon"])
+
+    def _draw_edit_lines(self, p):
+        """巡逻段 + 窝区：水平线段 + 两端刻度（派单 §2.4）。"""
+        for nm, val, col, label in (
+                ("mw_patrol", self.custom_patrol, (150, 190, 255), "巡逻段"),
+                ("nest", self.custom_nest, (255, 170, 200), "NEST")):
+            if val is None:
+                continue
+            a, b = float(val[0]), float(val[1])
+            yline = float(FLOOR_Y) if nm == "mw_patrol" else self._nest_draw_y()
+            sel = (self.edit_sel_obj == (nm, -1))
+            al = 255 if sel else 190
+            p.setPen(QPen(QColor(col[0], col[1], col[2], al), 3 if sel else 2))
+            p.drawLine(QPointF(a, yline), QPointF(b, yline))
+            # ⭐ 两端刻度：让"这段的左右端在哪"一眼可见
+            for xx in (a, b):
+                p.drawLine(QPointF(xx, yline - 9), QPointF(xx, yline + 9))
+            p.setPen(QColor(col[0], col[1], col[2], al))
+            p.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+            p.drawText(QPointF((a + b) / 2 - 22, yline - 14), label)
+            # ⭐ 巡逻段额外画中点小方块 = 微波炉的起点（派单 §2.4）：
+            #   让"他站在哪"和"他走哪"在一张图里同时可见。
+            if nm == "mw_patrol":
+                mid = (a + b) / 2.0
+                p.setPen(QPen(QColor(col[0], col[1], col[2], al), 2))
+                p.setBrush(QColor(col[0], col[1], col[2], 120))
+                p.drawRect(QRectF(mid - 7, yline - 40, 14, 14))
+
+    def _draw_edit_spawn(self, p):
+        """露娜起点：三角旗 + `L`（派单 §2.4）。⛔ None 时不画。
+
+        ⭐⭐ 起点是**最后画的一层**（在 `_draw_edit_overlay` 末尾调用）——
+           它最需要永远可见，不能被自定义地形盖住。
+        """
+        if self.custom_spawn is None:
+            return
+        x, y = float(self.custom_spawn[0]), float(self.custom_spawn[1])
+        sel = (self.edit_sel_obj == ("luna_spawn", -1))
+        c = (255, 226, 120)
+        al = 255 if sel else 200
+        p.setPen(QPen(QColor(c[0], c[1], c[2], al), 3 if sel else 2))
+        p.setBrush(QColor(c[0], c[1], c[2], 90))
+        p.drawLine(QPointF(x, y), QPointF(x, y - 46))          # 旗杆
+        p.drawPolygon(QPolygonF([QPointF(x, y - 46), QPointF(x + 30, y - 35),
+                                 QPointF(x, y - 24)]))          # 旗面
+        p.setPen(QColor(c[0], c[1], c[2], al))
+        p.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
+        p.drawText(QPointF(x + 6, y - 52), "L")
+        if sel:
+            p.drawText(QPointF(x - 30, y + 24), "起点 x=%d y=%d"
+                       % (int(x), int(y)))
+
     def _draw_edit_toolbar(self, p):
         """编辑器工具栏（画在视口坐标，**不跟随镜头**）。"""
         p.setPen(Qt.NoPen)
@@ -3694,23 +4650,58 @@ class NightWindow(QWidget):
             p.drawText(QPointF(x + 8, 24),
                        "%d %s" % (i, self._EDIT_KIND_CN[k]))
             x += 90
+        # ---------------- PR13 · 8 个工具（4/5/6 + 7/8/9/0/-）----------------
+        # ⭐ 用 EDIT_TOOLS 表驱动，不是手写一串 drawRoundedRect：
+        #   加一个工具只需要在表里加一行，**不可能出现"键位加了但按钮没加"**。
+        p.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        for name, cn, key in EDIT_TOOLS:
+            on = (self.edit_tool == name)
+            # ⭐ PR13 新工具用固定的青/紫色系，⛔ 不复用 _EDIT_COLOR
+            #   （那是 solid/brittle/climb 的语义色，混用会让"红色的东西"
+            #     到底是脆化地形还是 jar 食物说不清）。
+            c = ((120, 220, 255) if name in ("food", "fridge")
+                 else (255, 190, 240) if name in ("luna_spawn", "mw_patrol", "nest")
+                 else (200, 200, 210))
+            p.setPen(QPen(QColor(c[0], c[1], c[2], 255 if on else 100),
+                          2 if on else 1))
+            p.setBrush(QColor(c[0], c[1], c[2], 70 if on else 18))
+            p.drawRoundedRect(QRectF(x, 8, 74, 24), 5, 5)
+            p.setPen(QColor(c[0], c[1], c[2], 255 if on else 140))
+            p.drawText(QPointF(x + 6, 24), "%s %s" % (key, cn))
+            x += 78
         # ---- 工具 + 快捷键提示 ----
         p.setPen(QColor(150, 156, 172))
-        p.setFont(QFont("Microsoft YaHei", 10))
-        p.drawText(QPointF(x, 24),
-                   "4 矩形 5 直线(Shift 锁水平/垂直) 6 选择   Delete 删除   "
-                   "Ctrl+Z 撤销   C 清空   S 导出   O 导入   F4 试跑   F2 返回")
+        p.setFont(QFont("Microsoft YaHei", 9))
+        p.drawText(QPointF(14, 40),
+                   "Shift 直线锁水平/垂直   [ ]换 icon   , . 换 kind   "
+                   "Delete 删除选中（起点/巡逻/窝 = 恢复默认）   Ctrl+Z 撤销   "
+                   "C 清空全部   S 导出   O 导入   F4 试跑   F2 返回")
+        # ⭐ 巡逻段不拦"进冰箱体"（§2.3）：只提示，这是关卡设计约束，
+        #   编辑器不该替Ronny 决定。
+        p.setPen(QColor(210, 170, 120))
+        p.drawText(QPointF(14, VH - 30),
+                   "⚠ 微波炉 `self.y = FLOOR_Y` 是硬编码，他永远在地板上；"
+                   "巡逻段拖进冰箱范围不会被拦（那是关卡约束，不是编辑器的事）")
         # ---- 底部：数量 + 直线工具的留白说明（Q3 未拍板，必须让人看见）----
         p.setPen(QColor(200, 200, 210))
         p.setFont(QFont("Microsoft YaHei", 10))
+        # ⭐ 数量行必须把 5 类新对象的计数全列出来 ——
+        #   否则"我放了 3 个食物，界面只说地形 0 块"会让人以为没放成功。
         p.drawText(QPointF(14, VH - 14),
-                   "自定义 %d 块 ｜ 拖左键画/ 选中 ｜ 双击删除"
-                   % len(self.custom_terrains))
+                   "自定义地形 %d 块 ｜ 食物 %d ｜ 冰箱食物 %d ｜ 起点 %s ｜ 巡逻段 %s ｜ 窝区 %s ｜ "
+                   "拖左键画 / 选中 ｜ 双击删除"
+                   % (len(self.custom_terrains),
+                      len(self.custom_stashes or []),
+                      len(self.custom_fridge or []),
+                      "已设" if self.custom_spawn else "默认",
+                      "%d~%d" % self.custom_patrol if self.custom_patrol else "默认",
+                      "%d~%d" % self.custom_nest if self.custom_nest else "默认"))
         # ---- 二次确认提示 ----
         if self._confirm_clear:
             p.setPen(QColor(255, 120, 100))
             p.setFont(QFont("Microsoft YaHei", 13, QFont.Bold))
-            p.drawText(QPointF(VW / 2 - 130, VH - 40), "⚠ 再按一次 C 确认清空全部")
+            p.drawText(QPointF(VW / 2 - 190, VH - 52),
+                       "⚠ 再按一次 C 确认清空全部（地形 + 食物 + 起点 + 巡逻段 + 窝区）")
 
 # -- 选档 --
     def _draw_menu(self, p):
@@ -4051,7 +5042,11 @@ class NightWindow(QWidget):
         return pth
 
     def _draw_nest(self, p):
-        x0, x1 = NEST_X0, NEST_X1
+        # ⭐⭐⭐ PR13（Q12批准）：x0,x1 读 room.nest，**画法一个数都不动**。
+        #   ⛔⛔ 为什么必须跟着走：判定已改成读 room.nest，而画面上的窝还留在x=10
+        #     ⇒ 玩家看到判定在 1500、画面上窝还在 10 ⇒ **必被当 bug，且不报错**。
+        #   ⭐ 默认 `room.nest = (NEST_X0, NEST_X1) = (10, 200)` ⇒ 与旧值逐字相同。
+        x0, x1 = self.room.nest
         p.setBrush(QColor(96, 74, 96))
         p.drawRoundedRect(QRectF(x0, FLOOR_Y - 26, x1 - x0, 30), 12, 12)
         p.setBrush(QColor(128, 100, 126))
@@ -4072,7 +5067,7 @@ class NightWindow(QWidget):
                     p.setBrush(QColor(220, 180, 120))
                     p.drawEllipse(QPointF(bx + 10, by + 10), 8, 8)
         if self.loot_stash:
-            near = self.luna.x < NEST_X1 + 90
+            near = self.luna.x < self.room.nest[1] + 90
             p.setPen(QColor(255, 226, 150) if near else QColor(198, 176, 116))
             p.setFont(QFont('Microsoft YaHei', 12, QFont.Bold))
             tip = '按 E 结算' if near else ('窝边待结算 %d 样' % len(self.loot_stash))
@@ -4379,6 +5374,132 @@ class NightWindow(QWidget):
         ex = x + m.face * (_w / 2 - 14)
         p.drawRoundedRect(QRectF(ex - 6, y - _h + 20, 12, _h - 44), 5, 5)
 
+    # ---------------- PR14 · 攻击特效绘制 ----------------
+    # ⚠️⚠️ **绘制顺序就是打击感**（派单 §3.3），⛔ 别调换：
+    #   behind（刀光，角色**后面**）→ 角色 → front（冲击 + 蓄力粒子，角色**前面**）
+    #   冲击挡住角色 = 格斗游戏标准做法，是"打到了"的主要来源。
+
+    def _draw_fx_behind(self, p):
+        """角色**后面**：刀光 claw。"""
+        for e in self.fx:
+            if e.kind == "claw":
+                self._draw_fx_claw(p, e)
+
+    def _draw_fx_front(self, p):
+        """角色**前面**：命中冲击 impact + 蓄力粒子 charge。"""
+        for e in self.fx:
+            if e.kind == "impact":
+                self._draw_fx_impact(p, e)
+        for e in self.fx:
+            if e.kind == "charge":
+                self._draw_fx_charge(p, e)
+
+    def _draw_fx_claw(self, p, e):
+        """刀光：3 道弧（普攻 1 道 / 蓄力 2~3 道），由小扫到大、末端收尖。
+
+        ⭐ 沿用既有范式（`_draw_stashes` 的 scratched 分支）：
+          `QPen(QColor(...,a), w, Qt.SolidLine, Qt.RoundCap)` —— ⛔ 不自造画法。
+        ⭐⭐ `a(t) = (1-t)**1.4`：末端淡出；`w(t) = 7*sin(pi*t)`：先增后减收成尖。
+          ⛔ 这两条别"优化"成线性 —— 线性收尾会看起来像被切断，而不是挥空。
+        """
+        t = e.t
+        n = FX_CLAW_N[e.lvl]
+        for i in range(n):
+            _off = i * 15.0                   # ⭐ 多道弧向下叠（不是三道一样）
+            # ⭐ 每道弧错开一点相位 ⇒ 是"叠上去的刀气"
+            _ph = (t - i * 0.055) / max(1e-6, (1.0 - i * 0.055))
+            _ph = max(0.0, min(1.0, _ph))
+            r = e.r * (0.35 + 0.65 * _ph) * (1.0 - 0.13 * i)
+            w = 7.0 * math.sin(math.pi * _ph)
+            if w <= 0.2:
+                continue
+            a = int(255 * ((1.0 - _ph) ** 1.4))
+            if a <= 2:
+                continue
+            c = e.color
+            # ⚠️ `drawArc` 的角度单位是 **1/16 度**，且⛔ 传负跨度不会"镜像"——
+            #   镜像的正确做法是「换起点 + 反向跨度」。这是 Qt 的老坑。
+            p.setPen(QPen(QColor(c[0], c[1], c[2], a), w,
+                         Qt.SolidLine, Qt.RoundCap))
+            _a0 = -50.0 + _off              # ⭐ 多道弧向下叠
+            if e.facing >= 0:
+                p.drawArc(QRectF(e.x - r, e.y - r, 2 * r, 2 * r),
+                          int(_a0 * 16), int(100.0 * 16))
+            else:
+                p.drawArc(QRectF(e.x - r, e.y - r, 2 * r, 2 * r),
+                          int((80.0 - _off - 100.0) * 16), -int(100.0 * 16))
+
+    def _draw_fx_impact(self, p, e):
+        """命中冲击：6~8 条放射线 + 1 个圆环。
+
+        ⭐ 放射线**起始角错开 22.5°** ⇒ 不会左右对称得像特效图。
+        ⛔ 别改成"均匀 8 条从 0° 开始"—— 那看起来像 UI 图标，不像挥击。
+        """
+        t = e.t
+        c = e.color
+        al = int(255 * ((1.0 - t) ** 1.6))
+        if al <= 2:
+            return
+        _n = 6 + 2 * e.lvl               # 档越高线越多
+        _L = 10.0 + 46.0 * t
+        _w = max(0.4, 3.5 * (1.0 - t))
+        p.setPen(QPen(QColor(c[0], c[1], c[2], al), _w,
+                     Qt.SolidLine, Qt.RoundCap))
+        for i in range(_n):
+            ang = math.radians(22.5 + i * (360.0 / _n))
+            dx, dy = math.cos(ang), math.sin(ang)
+            # ⭐ 放射线只画"身前"那一半（另一半在角色背后，看不见也不该看）
+            if dx * e.facing < -0.25:
+                continue
+            p.drawLine(QPointF(e.x + dx * _L * 0.35, e.y + dy * _L * 0.35),
+                       QPointF(e.x + dx * _L, e.y + dy * _L))
+        # ---- 圆环 ----
+        _r = 6.0 + 30.0 * t
+        _rw = max(0.4, 4.0 * (1.0 - t))
+        p.setPen(QPen(QColor(c[0], c[1], c[2], int(al * 0.85)), _rw,
+                     Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPointF(e.x, e.y), _r, _r)
+
+    def _draw_fx_charge(self, p, e):
+        """蓄力粒子 —— ⭐ **蓄力指示器**（Ronny：要粒子变化作为指示）。
+
+        ⭐⭐⭐ **三阶段，颜色 + 数量 + 脉动幅度三个维度同时变**
+           （派单 §3.4）：只变色的话快速操作时眼睛来不及看。
+             聚拢中（白 14 粒）→蓄力1 就绪（**红** 14 粒）→ 蓄力2 就绪（**蓝** 26 粒）
+        ⚠️ **阶段用 `charge_t` 判，脉动用 `e.t` 算** ——⛔ 阶段切换时绝不重置 e.t，
+           否则粒子会跳一下。
+        ⭐ 每个粒子有随机相位偏移 `i*0.37` ⇒⛔ 否则 14 个粒子同步移动，
+           看起来像一坨整体在动而不是一堆粒子。
+        """
+        ct = max(0.0, min(ATK_CHARGE2, self.luna.charge_t))
+        # ---- 选阶段（⛔ 阶段切换时⛔ 不重置 e.t）----
+        st = FX_CHARGE_STAGES[0]
+        for _s in FX_CHARGE_STAGES:
+            if ct >= _s[0]:
+                st = _s
+        _t0, col, n, amp, ring = st
+        # ⭐ 脉动：e.t 是全局进度，阶段切换时连续 ⇒ 不会跳
+        pulse = amp * math.sin(e.t * 18.0)
+        cx, cy = e.x, e.y
+        # ⭐ 聚拢中：粒子从 90px 外圈**向内吸**（用 charge_t 映射 1→0）
+        if st is FX_CHARGE_STAGES[0]:
+            _p = max(0.0, min(1.0, ct / max(1e-6, ATK_HINT)))
+            ring_now = ring * (1.0 - 0.35 * _p)
+        else:
+            ring_now = ring
+        p.setBrush(QColor(col[0], col[1], col[2], 220))
+        p.setPen(QPen(QColor(col[0], col[1], col[2], 235), 1.4))
+        for i in range(n):
+            ang = i * (360.0 / n) + i * 0.37          # ⭐ 相位偏移
+            rad = ring_now + pulse
+            a = math.radians(ang)
+            px = cx + math.cos(a) * rad
+            py = cy + math.sin(a) * rad * 0.62# ⭐ 压扁成椭圆（贴合身体）
+            p.setBrush(QColor(col[0], col[1], col[2],
+                               170 + int(70 * (0.5 + 0.5 * math.sin(e.t * 6.0 + i)))))
+            p.drawEllipse(QPointF(px, py), 2.6 + 0.9 * e.lvl, 2.6 + 0.9 * e.lvl)
+
     def _draw_luna(self, p):
         l = self.luna
         s = self.s
@@ -4399,6 +5520,45 @@ class NightWindow(QWidget):
                     if ic is not None:
                         p.drawImage(QRectF(l.x - 9 + i * 18, l.y - 118 - i * 6, 18, 18),
                                     ic, QRectF(0, 0, ic.width(), ic.height()))
+                return
+        # ============ PR15 · attack / attack_charge 走游戏帧 ============
+        # ⭐⭐⭐ **这是「大小问题」的修复点**（Ronny 实机反馈"又复发了"）。
+        #
+        # ⚠️⚠️⚠️ 为什么必须是这一处，根因在这里：
+        #   桌宠分支的画布是 packs 的 640×640，绘制时**乘 s**
+        #   （`s = ACTOR_H / body_h`）⇒ 角色高约 501px；
+        #   游戏帧的画布是**归一化后的** 178 高（本体 132px），**⛔ 不乘 s**。
+        #   ⇒ 两张图走**两条不同的缩放路径**。
+        #   ⇒ 只要攻击动作还落在桌宠分支（tease），就必然大 3.8 倍。
+        #   ⚠️ 这不是"数值没调好"——把 s 调小去凑 attack 帧会**反过来弄坏桌宠动作**。
+        #   ✅ 唯一正确的修法：让 attack 走游戏帧，和 run_carry 同一条路。
+        #
+        # ⛔ 三条硬要求（照抄 run_carry 分支的写法）：
+        #   ① 必须 return —— ⛔ 不许落回桌宠分支（那才是"大小又复发"的直接原因）
+        #   ② 帧列表为空时 **print 告警** —— ⛔ 不许静默兜底画 idle
+        #      （同一个坑不能踩第二次：tease 那次就是静默兜底了整整两轮）
+        #   ③ 用 `GAME_FPS[l.act]` 查表，⛔ 不写死帧率
+        if l.act in ("attack", "attack_charge"):
+            _af = self.gframes.get(l.act) or []
+            if not _af:
+                # ⛔⛔ 静默兜底 = Ronny 实机看到"攻击没动画"，而代码"看起来没问题"
+                print("[夜间] ⚠️ 游戏帧缺 %s（大小会回退成桌宠比例）" % l.act)
+            else:
+                _k = int(l.t * GAME_FPS[l.act]) % len(_af)
+                _pm, _cw, _ch, _ax, _ay = _af[_k]
+                p.save()
+                p.translate(l.x, l.y)
+                # ⭐ 规则与 run_carry 一致：「与素材原始朝向不一致才镜像」
+                if l.face != GAME_SRC_FACE[l.act]:
+                    p.scale(-1.0, 1.0)
+                # ⛔⛔ 不乘 s：_cw/_ch 已经是归一化后的成品尺寸
+                p.drawImage(QRectF(-_ax, -_ay, _cw, _ch), _pm, QRectF(0, 0, _cw, _ch))
+                p.restore()
+                for i, nm in enumerate(l.carrying):
+                    ic = self.icons.get(_loot_split(nm)[1])
+                    if ic is not None:
+                        p.drawImage(QRectF(l.x - 9 + i * 18, l.y - 118 - i * 6,
+                                            18, 18), ic, QRectF(0, 0, ic.width(), ic.height()))
                 return
         imgs = self.imgs.get(l.act) or self.imgs["idle"]
         act = self.pack.actions.get(l.act) or self.pack.actions["idle"]

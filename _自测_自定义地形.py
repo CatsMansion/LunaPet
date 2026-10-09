@@ -901,6 +901,435 @@ except OSError:
     pass
 
 # ============================================================================
+#⑮ · PR13 · 食物 / 起点 / 巡逻段 / 窝区 纳入编辑器（派单 §5.1 十二条）
+#
+#⭐ 纪律：**只追加、只驱动真实代码**（真实按键 / 真实鼠标事件 / 真实 Room），
+#   ⛔ 一条都不许在脚本里复刻实现（复刻 = 测的是我自己的复制品，不是游戏）。
+#===========================================================================
+
+section("⑮ · PR13 · 食物与起点可编辑（派单 §5.1 十二条判据）")
+
+w4 = N.NightWindow(load_pack(os.path.join(HERE, "packs", "luna")))
+w4.set_mode("edit")
+
+# ---- 判据 1：默认态回归（"默认行为必须逐字不变"的证明）----
+# ⭐⭐ 这是 12 条里最重要的一条：不进编辑器 / 编辑器里什么都不放 ⇒ 与改之前逐字段相等。
+#   ⛔ 不能只比"没报错" —— 必须**逐字段对到值**。
+r_def = N.Room(N.NIGHTS[0])
+_d = {
+    "stashes": [(s["x"], s["y"], s["icon"], s["kind"], s["noise"],
+                 s["fury"], s["value"], s["hit"]) for s in r_def.stashes],
+    "fridge_left": [(f["x"], f["y"], f["icon"]) for f in r_def.fridge_left],
+    "spawn_luna": r_def.spawn_luna,
+    "mw_patrol": r_def.mw_patrol,
+    "nest": r_def.nest,
+}
+# ⭐ 手算：默认必须等于这些老常量/模块常量，一个数都不许偏。
+_ok1 = (_d["spawn_luna"] == (N.NEST_X0 + 70.0, float(N.FLOOR_Y))
+        and _d["nest"] == (float(N.NEST_X0), float(N.NEST_X1))
+        and _d["mw_patrol"] == tuple(N.NIGHTS[0]["patrol"])
+        and _d["fridge_left"] == [(f["x"], f["y"], f["icon"]) for f in N.FRIDGE_FOODS]
+        and len(_d["stashes"]) == len(N.NIGHTS[0]["stashes"]))
+chk("⑮-1 ⭐⭐ 默认态逐字段回归（默认行为逐字不变）", _ok1,
+    "spawn=%s nest=%s patrol=%s 容器%d 冰箱%d"
+    % (_d["spawn_luna"], _d["nest"], _d["mw_patrol"],
+       len(_d["stashes"]), len(_d["fridge_left"])))
+
+# ---- 判据 12（先做阳性对照）：默认 7 条当自定义灌进去 ⇒ 与默认逐字段相等 ----
+# ⭐ 放在 2 之前：它证明"自定义走的是同一段解算逻辑"，是第2 条的前提。
+_n3 = N.NIGHTS[0]["stashes"]
+r_pos = N.Room(N.NIGHTS[0], overrides={"stashes": [dict(s) for s in _n3]})
+_pos_same = ([(s["x"], s["y"], s["icon"], s["kind"], s["noise"], s["fury"],
+               s["value"], s["hit"]) for s in r_pos.stashes] == _d["stashes"])
+chk("⑮-12 ⭐ 阳性对照：默认 stashes 当自定义灌入 ⇒ 与默认逐字段相等", _pos_same,
+    "n=%d" % len(r_pos.stashes))
+
+# ---- 判据 2：放一个 food ⇒ 走同一段解算（noise/fury/value/hit 来自 KIND_TABLE）----
+w4._edit_key(Qt.Key_7)
+chk("⑮-2a 按 7 切到 food 工具", w4.edit_tool == "food", "tool=%s" % w4.edit_tool)
+_fx, _fy = 480.0, 488.0
+w4.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
+                          (_fx * w4.k, _fy * w4.k)))
+w4.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton,
+                             (_fx * w4.k, _fy * w4.k)))
+_ok2 = (w4.custom_stashes is not None and len(w4.custom_stashes) == 1
+        and w4.room.stashes[-1]["x"] == _fx and w4.room.stashes[-1]["y"] == _fy)
+_spec2 = N.KIND_TABLE["loose"]
+_ok2b = (w4.room.stashes[-1]["noise"] == _spec2["noise"]
+         and w4.room.stashes[-1]["fury"] == _spec2["fury"]
+         and w4.room.stashes[-1]["value"] == _spec2["value"]
+         and w4.room.stashes[-1]["hit"] == _spec2["hit"])
+chk("⑮-2 ⭐⭐ 放一个 food ⇒ room.stashes 多一条且走同一段解算", _ok2 and _ok2b,
+    "room 实测 %s" % (w4.room.stashes[-1] if w4.room.stashes else "—"))
+
+# ---- 判据 3：放一个 fridge food ----
+w4._edit_key(Qt.Key_8)
+chk("⑮-3a 按 8 切到 fridge 工具", w4.edit_tool == "fridge", "tool=%s" % w4.edit_tool)
+_gx, _gy = float(N.FRIDGE["x"]) + 28.0, float(N.FRIDGE["y"]) - 300.0
+w4.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
+                          (_gx * w4.k, _gy * w4.k)))
+w4.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton,
+                             (_gx * w4.k, _gy * w4.k)))
+_ok3 = (w4.custom_fridge is not None and len(w4.custom_fridge) == 1
+        and w4.room.fridge_left[-1]["x"] == _gx)
+chk("⑮-3 ⭐ 放一个 fridge food ⇒ room.fridge_left 多一条", _ok3,
+    "fridge_left 末条 %s" % (w4.room.fridge_left[-1] if w4.room.fridge_left else "—"))
+
+# ---- 判据 4：设露娜起点 x=2000，**且 :1621 兜底路径也走这个点** ----
+# ⭐⭐ 后半段是这条判据的重点：只测 room.spawn_luna 等于没测——
+#   `Luna.update` 里的掉出世界兜底拿不到 window，只能读 room。
+#   ⛔ 不断言这一段，就会出现"编辑器里设了起点、掉出世界又弹回 80"这种
+#      只在极端情况出现的 bug。
+w4._edit_key(Qt.Key_9)
+chk("⑮-4a 按 9 切到 luna_spawn 工具", w4.edit_tool == "luna_spawn",
+    "tool=%s" % w4.edit_tool)
+w4.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
+                          (2000.0 * w4.k, float(N.FLOOR_Y) * w4.k)))
+_ok4 = (w4.custom_spawn is not None and abs(w4.custom_spawn[0] - 2000.0) < 0.01)
+chk("⑮-4 ⭐⭐ 设露娜起点 x=2000 ⇒ room.spawn_luna 生效", _ok4,
+    "spawn_luna=%s" % (w4.room.spawn_luna,))
+
+# ⭐ 兜底路径：把 luna 丢到 y > VH+400，跑一次 update，x 必须被拉回 2000
+#⛔ `Luna.update` 的签名是 `update(self, dt, keys, room)` —— ⛔ 三个参数都要传。
+#   （写判据时我漏了 keys，脚本直接 TypeError。⚠️ 报「缺参数」时先看真实签名，
+#     别把自己猜的签名当结论。）
+w4.luna.y = float(N.VH) + 400.0
+w4.luna.x = 80.0
+w4.luna.update(DT, set(), w4.room)
+_ok4b = abs(w4.luna.x - 2000.0) < 2.0
+chk("⑮-4b ⭐⭐ 掉出世界兜底（:1621）也走新起点，不是回 80", _ok4b,
+    "掉下去后 x=%.1f（期望≈2000，⛔ 若=80 就是漏改了兜底那处）" % w4.luna.x)
+
+# ---- 判据 5：设窝区 [1500,1700] ⇒ 回窝判定跟着走 ----
+# ⭐ 必须驱动**真实判定**（_tick 里那段），⛔ 不能直接读 room.nest 就说通过。
+w4._edit_key(Qt.Key_Minus)
+chk("⑮-5a 按 - 切到 nest 工具", w4.edit_tool == "nest", "tool=%s" % w4.edit_tool)
+_n0, _n1 = 1500.0 * w4.k, 1700.0 * w4.k
+w4.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton, (_n0, float(N.FLOOR_Y) * w4.k)))
+w4.mouseMoveEvent(_mouse(QEvent.MouseMove, Qt.NoButton, (_n1, float(N.FLOOR_Y) * w4.k)))
+w4.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton, (_n1, float(N.FLOOR_Y) * w4.k)))
+_ok5 = (w4.custom_nest is not None and abs(w4.custom_nest[0] - 1500.0) < 0.01
+        and abs(w4.custom_nest[1] - 1700.0) < 0.01)
+chk("⑮-5 ⭐⭐ 拖出窝区 [1500,1700] ⇒ room.nest 生效", _ok5,
+    "room.nest=%s" % (w4.room.nest,))
+
+# ⭐ 真实判定：l.x < nest[1] 且 carrying ⇒ 结算成功
+# ⛔⛔ **顺序陷阱（实测踩过）**：先 `set_mode("play")` 再设 `phase="play"`。
+#   `set_mode` 内部把 `phase` 留在 `"menu"`，而回窝判定在 `phase=="play"`
+#   分支里 ⇒ 先设 phase 再 set_mode 会被覆盖掉，判定**永远不跑**，
+#   表现为"窝区明明改了却不结算"。
+#   ⚠️ 差点误判成代码 bug —— 报「不生效」之前先确认门禁条件真的满足了。
+w4.set_mode("play")                     # ⭐ 先切 play（重建 room，带 overrides）
+w4.phase = "play"                       # ⭐ 再开跑（set_mode 会把它留在 menu）
+w4.luna.carrying = ["yolk"]
+w4.loot_stash = []
+w4.luna.x = 1600.0
+w4.luna.y = float(N.FLOOR_Y)
+step(w4, n=2)
+_ok5b = len(w4.loot_stash) == 1 and not w4.luna.carrying
+chk("⑮-5b ⭐⭐ 窝区改到 1500~1700 后，x=1600 带着东西 ⇒ 回窝结算成功", _ok5b,
+    "room.nest=%s loot_stash=%s carrying=%s"
+    % (w4.room.nest, w4.loot_stash, w4.luna.carrying))
+# ⭐ 反向：x=1900（新旧窝区都在外）⇒ 不该结算
+w4.loot_stash = []
+w4.luna.carrying = ["yolk"]
+w4.luna.x = 1900.0
+w4.luna.y = float(N.FLOOR_Y)
+step(w4, n=2)
+_ok5c = len(w4.loot_stash) == 0
+chk("⑮-5c ⭐ 窝区外（x=1900）⇒ 不判定成功", _ok5c,
+    "loot_stash=%s" % (w4.loot_stash,))
+# ⭐⭐ **阳性对照**：同一条判定，换到旧窝区 (10,200) 的 x=150 应当成功。
+#   ⛔ 没有这一条，⑮-5c 的"不结算"可能只是因为**判定根本没跑**
+#     （门禁没满足时也是 loot=[]，与"判定生效且不成立"完全同形）。
+w4.set_mode("play")
+w4.custom_nest = None                      # ⭐ 恢复默认窝 (10,200)
+w4._apply_overrides_now()
+w4.phase = "play"
+w4.luna.carrying = ["yolk"]
+w4.loot_stash = []
+w4.luna.x = 150.0
+w4.luna.y = float(N.FLOOR_Y)
+step(w4, n=2)
+chk("⑮-5d ⭐⭐ 阳性对照：默认窝(10,200) 下 x=150 带着东西 ⇒ **确实结算了**",
+    len(w4.loot_stash) == 1,
+    "loot_stash=%s（若为[]说明上面 ⑮-5c 是假阴性）" % (w4.loot_stash,))
+w4.set_mode("edit")
+
+# ---- 判据 6：设巡逻段 [2000,2400] ⇒ Microwave.x == 2200 ----
+# ⛔⛔ **必须先把 cam_x 归零**（实测踩过）：`_to_world` 是 `px/k + cam_x`
+#   （绘制端也 `translate(-cam_x)`，两边一致、代码没问题），
+#   而上面 ⑮-5b 跑过 _tick ⇒ 镜头跟着露娜走到了 cam_x=311。
+#   ⇒ 我按屏幕坐标 x*k 拖，实际落到世界 x+311 ⇒ 拖出来是 [2311,2711]。
+#   ⚠️ 差点误判成「工具算错了」。**报坐标不对之前先量 cam_x**。
+w4.set_mode("edit")
+w4.cam_x = 0.0
+w4._edit_key(Qt.Key_0)
+chk("⑮-6a 按 0 切到 mw_patrol 工具", w4.edit_tool == "mw_patrol",
+    "tool=%s" % w4.edit_tool)
+_p0, _p1 = 2000.0 * w4.k, 2400.0 * w4.k
+w4.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton, (_p0, float(N.FLOOR_Y) * w4.k)))
+w4.mouseMoveEvent(_mouse(QEvent.MouseMove, Qt.NoButton, (_p1, float(N.FLOOR_Y) * w4.k)))
+w4.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton, (_p1, float(N.FLOOR_Y) * w4.k)))
+_ok6 = abs(w4.room.mw_patrol[0] - 2000.0) < 0.01 and abs(w4.room.mw_patrol[1] - 2400.0) < 0.01
+chk("⑮-6 ⭐⭐ 拖出巡逻段 [2000,2400] ⇒ Microwave.x== 2200（起点=中点）",
+    _ok6 and abs(w4.mw.x - 2200.0) < 0.01,
+    "patrol=%s mw.x=%.1f" % (w4.room.mw_patrol, w4.mw.x))
+# ⭐⭐ **巡逻不拦进冰箱体**（§2.3）：那是关卡设计约束，编辑器不替Ronny 决定
+w4._edit_key(Qt.Key_0)
+w4.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton, (1000.0 * w4.k, float(N.FLOOR_Y) * w4.k)))
+w4.mouseMoveEvent(_mouse(QEvent.MouseMove, Qt.NoButton, (1400.0 * w4.k, float(N.FLOOR_Y) * w4.k)))
+w4.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton, (1400.0 * w4.k, float(N.FLOOR_Y) * w4.k)))
+_ok6b = (w4.custom_patrol is not None
+          and abs(w4.custom_patrol[1] - 1400.0) < 0.01)
+chk("⑮-6b ⭐ 巡逻段拖进冰箱范围**不被拦**（只提示，§2.3）", _ok6b,
+    "patrol=%s" % (w4.custom_patrol,))
+
+# ---- 判据 7：撤销栈覆盖 5 类新对象 ----
+# ⭐⭐ 不是"撤 5 次"，而是**每次改动都在栈里**：放 3 个 food + 改窝区 = 4 次改动，
+#   撤 4 次应回到全默认。⛔ 只测地形撤销 = 没测到 PR13。
+w5 = N.NightWindow(load_pack(os.path.join(HERE, "packs", "luna")))
+w5.set_mode("edit")
+w5._edit_key(Qt.Key_7)
+for _fx2, _fy2 in ((480.0, 488.0), (600.0, 488.0), (720.0, 488.0)):
+    w5.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
+                              (_fx2 * w5.k, _fy2 * w5.k)))
+    w5.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton,
+                                 (_fx2 * w5.k, _fy2 * w5.k)))
+w5._edit_key(Qt.Key_Minus)
+w5.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
+                          (1500.0 * w5.k, float(N.FLOOR_Y) * w5.k)))
+w5.mouseMoveEvent(_mouse(QEvent.MouseMove, Qt.NoButton,
+                         (1700.0 * w5.k, float(N.FLOOR_Y) * w5.k)))
+w5.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton,
+                             (1700.0 * w5.k, float(N.FLOOR_Y) * w5.k)))
+_n_undo = 4
+_n_ok = 0
+for _ in range(_n_undo):
+    if w5.edit_undo():
+        _n_ok += 1
+_ok7 = (_n_ok == _n_undo and w5.custom_stashes is None
+        and w5.custom_nest is None
+        and w5.room.nest == (float(N.NEST_X0), float(N.NEST_X1))
+        and w5.room.spawn_luna == (N.NEST_X0 + 70.0, float(N.FLOOR_Y)))
+chk("⑮-7 ⭐⭐ 撤销栈覆盖 5 类：3 食物 + 窝区，撤 4 次全回默认", _ok7,
+    "撤了%d次 stashes=%s nest=%s room.nest=%s"
+    % (_n_ok, w5.custom_stashes, w5.custom_nest, w5.room.nest))
+
+# ---- 判据 10：导出「全null」⇒ version 仍为 1、键仍只有四个（§4.2）----
+w6 = N.NightWindow(load_pack(os.path.join(HERE, "packs", "luna")))
+w6.set_mode("edit")
+_tp6 = os.path.join(HERE, "_work", "_pr13_v1.json")
+os.makedirs(os.path.dirname(_tp6), exist_ok=True)
+w6.custom_terrains = [{"kind": "solid", "x0": 100.0, "y0": 500.0,
+                       "x1": 300.0, "y1": 599.0}]
+w6.terrain_path = _tp6
+w6.export_terrain(_tp6)
+with open(_tp6, encoding="utf-8") as _f:
+    _d10 = json.load(_f)
+_ok10 = (_d10["version"] == 1
+         and sorted(_d10.keys()) == ["floor_y", "terrains", "version", "world_w"])
+chk("⑮-10 ⭐⭐ 编辑器什么都没放 ⇒ 导出仍是 v1 四键（§4.2）", _ok10,
+    "version=%r keys=%s" % (_d10.get("version"), sorted(_d10.keys())))
+
+# ---- 判据 8：导出 v2 ⇒ 导入 ⇒ 往返一致（含 [] 语义）----
+w6._edit_key(Qt.Key_7)
+for _fx3, _fy3 in ((480.0, 488.0), (600.0, 488.0)):
+    w6.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
+                              (_fx3 * w6.k, _fy3 * w6.k)))
+    w6.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton,
+                                 (_fx3 * w6.k, _fy3 * w6.k)))
+w6._edit_key(Qt.Key_9)
+w6.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
+                          (2400.0 * w6.k, float(N.FLOOR_Y) * w6.k)))
+w6._edit_key(Qt.Key_Minus)
+w6.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
+                          (1500.0 * w6.k, float(N.FLOOR_Y) * w6.k)))
+w6.mouseMoveEvent(_mouse(QEvent.MouseMove, Qt.NoButton,
+                         (1700.0 * w6.k, float(N.FLOOR_Y) * w6.k)))
+w6.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton,
+                             (1700.0 * w6.k, float(N.FLOOR_Y) * w6.k)))
+w6._edit_key(Qt.Key_0)
+w6.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
+                          (2000.0 * w6.k, float(N.FLOOR_Y) * w6.k)))
+w6.mouseMoveEvent(_mouse(QEvent.MouseMove, Qt.NoButton,
+                         (2400.0 * w6.k, float(N.FLOOR_Y) * w6.k)))
+w6.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton,
+                             (2400.0 * w6.k, float(N.FLOOR_Y) * w6.k)))
+_before8 = (copy.deepcopy(w6.custom_stashes), copy.deepcopy(w6.custom_spawn),
+            copy.deepcopy(w6.custom_patrol), copy.deepcopy(w6.custom_nest))
+w6.export_terrain(_tp6)
+with open(_tp6, encoding="utf-8") as _f:
+    _d8 = json.load(_f)
+# ⭐⭐期望值**不是** 5 个键都在 —— `fridge_foods` 没设（非 None 判定）⇒ 不写键。
+#   ⛔ 我第一版判据写成"5 个键齐全"，实测红了；查下来发现**代码是对的**
+#     （§4.2 的契约是"非 None 才写键"）⇒ 改判据，不是改代码。
+#     ⚠️ 这就是「红线」：红了先问"是代码错还是判据错"，不许直接改期望值。
+_ok8a = (_d8["version"] == 2
+         and all(k in _d8 for k in ("stashes", "spawn", "mw_patrol", "nest"))
+         # ⭐ fridge_foods 必须**不在**键里（它是 None ⇒ 不覆盖）
+         and "fridge_foods" not in _d8
+         and sorted(_d8.keys()) == ["floor_y", "mw_patrol", "nest", "spawn",
+                                    "stashes", "terrains", "version", "world_w"])
+# 清空后导回来
+w6.custom_stashes = None
+w6.custom_spawn = None
+w6.custom_patrol = None
+w6.custom_nest = None
+w6.import_terrain(_tp6)
+_after8 = (w6.custom_stashes, w6.custom_spawn, w6.custom_patrol, w6.custom_nest)
+_ok8b = (_after8[0] is not None and len(_after8[0]) == len(_before8[0])
+         and abs(_after8[1][0] - _before8[1][0]) < 0.01
+         and abs(_after8[2][0] - _before8[2][0]) < 0.01
+         and abs(_after8[3][0] - _before8[3][0]) < 0.01)
+chk("⑮-8a ⭐⭐ 放了东西 ⇒ 导出升 v2；非 None 的键齐全、None 的不写（§4.2 契约）",
+    _ok8a, "version=%r keys=%s" % (_d8.get("version"), sorted(_d8.keys())))
+chk("⑮-8b ⭐⭐ v2 导出 → 导入 ⇒ 4 类对象往返一致", _ok8b,
+    "前=%s\n后=%s" % (_before8, _after8))
+# ⭐⭐ [] 语义：显式清空 导入后仍是 []，不是 None
+_tp8b = os.path.join(HERE, "_work", "_pr13_empty.json")
+with open(_tp8b, "w", encoding="utf-8") as _f:
+    json.dump({"version": 2, "world_w": int(N.WORLD_W), "floor_y": int(N.FLOOR_Y),
+               "terrains": [], "stashes": [], "fridge_foods": [],
+               "spawn": None, "mw_patrol": None, "nest": None}, _f)
+w6.import_terrain(_tp8b)
+_ok8c = (w6.custom_stashes == [] and w6.custom_spawn is None
+         and w6.custom_nest is None)
+chk("⑮-8c ⭐⭐ null 语义：[] 导入后仍是 []（=显式清空），null 仍是 None", _ok8c,
+    "stashes=%r spawn=%r nest=%r" % (w6.custom_stashes, w6.custom_spawn, w6.custom_nest))
+
+# ---- 判据 9：导入 v1（只有四键）⇒ 成功，新增字段全 None，地形不变 ----
+_tp9 = os.path.join(HERE, "_work", "_pr13_v1_in.json")
+with open(_tp9, "w", encoding="utf-8") as _f:
+    json.dump({"version": 1, "world_w": int(N.WORLD_W), "floor_y": int(N.FLOOR_Y),
+               "terrains": [{"kind": "solid", "x0": 1500.0, "y0": 500.0,
+                             "x1": 1700.0, "y1": 599.0}]}, _f)
+w6.custom_stashes = None
+w6.import_terrain(_tp9)
+_ok9 = (len(w6.custom_terrains) == 1
+        and w6.custom_stashes is None and w6.custom_fridge is None
+        and w6.custom_spawn is None and w6.custom_patrol is None
+        and w6.custom_nest is None
+        and w6.room.nest == (float(N.NEST_X0), float(N.NEST_X1)))
+chk("⑮-9 ⭐⭐ 导入 v1 四键 ⇒ 成功，5 类新增字段全 None，地形不变", _ok9,
+    "terrains=%d stashes=%r room.nest=%s" % (len(w6.custom_terrains),
+                                            w6.custom_stashes, w6.room.nest))
+
+# ---- 判据 11：阴性态（非法必须抛，⛔ 静默 = 用户以为导入了其实没变）----
+def _raises(fn):
+    try:
+        fn()
+        return False
+    except (ValueError, TypeError):
+        return True
+
+_base_ok = {"version": 2, "world_w": int(N.WORLD_W), "floor_y": int(N.FLOOR_Y),
+            "terrains": []}
+_cases = [
+    ("icon='apple'（白名单外）", dict(_base_ok, stashes=[{"x": 1, "y": 1, "icon": "apple", "kind": "loose"}])),
+    ("kind='fridge'（地面容器）", dict(_base_ok, stashes=[{"x": 1, "y": 1, "icon": "yolk", "kind": "fridge"}])),
+    ("mw_patrol=[2400,2000]（左≥右）", dict(_base_ok, mw_patrol=[2400, 2000])),
+    ("nest=[900,900]（退化点）", dict(_base_ok, nest=[900, 900])),
+    ("stashes.x=true（bool 伪装成 1.0）", dict(_base_ok, stashes=[{"x": True, "y": 1, "icon": "yolk", "kind": "loose"}])),
+    ("mw_patrol 长度=3", dict(_base_ok, mw_patrol=[1, 2, 3])),
+    ("version=99", dict(_base_ok, version=99)),
+]
+_bad11 = []
+for _nm, _doc in _cases:
+    if not _raises(lambda d=_doc: N.overrides_from_json(d)):
+        _bad11.append(_nm)
+chk("⑮-11 ⭐⭐ 阴性态：7 种非法输入全部抛异常（⛔ 一个都没静默通过）",
+    not _bad11, "未抛的：%s" % (_bad11 if _bad11 else "无"))
+
+# ---- ⭐⭐ 阳性对照（判据 11 的镜像）----
+#⛔ 阴性结果必须有阳性对照，否则「没抛」可能只是因为「压根没解析」。
+#   ⇒ 拿一份**已知合法**的 v2 文档喂进去，必须**不抛**且解出正确值。
+_ok_pos = []
+for _nm, _doc in [
+        ("合法 2 食物", dict(_base_ok, stashes=[{"x": 480, "y": 488, "icon": "yolk", "kind": "loose"},
+                                            {"x": 600, "y": 488, "icon": "salmon", "kind": "jar"}])),
+        ("合法 patrol/nest/spawn", dict(_base_ok, mw_patrol=[2000, 2400], nest=[1500, 1700],
+                                    spawn={"luna": {"x": 80, "y": 599}})),
+]:
+    try:
+        _ov = N.overrides_from_json(_doc)
+        if _nm.startswith("合法 2"):
+            _ok_pos.append(len(_ov.get("stashes", [])) == 2
+                           and _ov["stashes"][1]["kind"] == "jar")
+        else:
+            _ok_pos.append(abs(_ov["mw_patrol"][0] - 2000) < 0.01
+                           and _ov["spawn"]["luna"][0] == 80.0)
+    except (ValueError, TypeError) as _e:
+        _ok_pos.append(False)
+chk("⑮-11b ⭐⭐ 阳性对照：合法 v2 输入**不抛**且解出正确值（证明判据有分辨力）",
+    all(_ok_pos), "结果=%s" % (_ok_pos,))
+
+# ---- ⭐ 补充：edit_clear 必须清 5 类（交接包 §4.3 裁定）----
+w6.custom_stashes = [{"x": 1.0, "y": 1.0, "icon": "yolk", "kind": "loose"}]
+w6.custom_fridge = [{"x": 1150.0, "y": 300.0, "icon": "yolk"}]
+w6.custom_spawn = (500.0, 599.0)
+w6.custom_patrol = (2000.0, 2400.0)
+w6.custom_nest = (1500.0, 1700.0)
+w6.edit_clear()
+_ok_clr = (w6.custom_stashes is None and w6.custom_fridge is None
+           and w6.custom_spawn is None and w6.custom_patrol is None
+           and w6.custom_nest is None
+           and w6.room.nest == (float(N.NEST_X0), float(N.NEST_X1)))
+chk("⑮-13 ⭐⭐ edit_clear 清掉 5 类新对象（⛔ 只清地形比不清更坏）", _ok_clr,
+    "stashes=%r fridge=%r spawn=%r patrol=%r nest=%r"
+    % (w6.custom_stashes, w6.custom_fridge, w6.custom_spawn,
+       w6.custom_patrol, w6.custom_nest))
+
+# ---- ⭐ 补充：单实例「删除」= 恢复默认，不是删没了（§2.1）----
+w6.custom_spawn = (500.0, 599.0)
+w6._apply_overrides_now()
+_before_del = w6.room.spawn_luna
+# ⭐ 标签用**工具名**"luna_spawn"（⛔ 不是 JSON 键名 "spawn"：
+#   这两个混用会让 `_edit_del_obj` 静默走进 else 分支，删了等于没删）
+w6.edit_sel_obj = ("luna_spawn", -1)
+_r14 = w6._edit_del()
+# ⭐ 判据的真正要点是**两件事同时成立**：
+#   ① custom_spawn 变None（不是"永远没有起点"）
+#   ② room.spawn_luna 回到**关卡默认**（NEST_X0+70），而不是留着旧值 500
+# ⛔ 我第一版只写了①，红了才去看② —— 排查后确认代码本来就是对的，
+#   是我把断言写反了（把"恢复默认"当成了失败）。
+_ok_del = (_r14 is True
+           and w6.custom_spawn is None
+           and abs(w6.room.spawn_luna[0] - (N.NEST_X0 + 70.0)) < 0.01)
+chk("⑮-14 ⭐⭐ 单实例删除 = 恢复默认（置 None），不是「永远没有起点」", _ok_del,
+    "删前 room.spawn_luna=%s → _edit_del()=%s →删后 custom_spawn=%r room.spawn_luna=%s（期望回到 %.0f）"
+    % (_before_del, _r14, w6.custom_spawn, w6.room.spawn_luna, N.NEST_X0 + 70.0))
+
+# ---- ⭐ 补充：工具栏/ 绘制必须真的能跑（paintEvent 强制 render 一次）----
+# ⭐ 纪律③：paintEvent 里的错只在真渲染时暴露。
+#   判据只查字段不渲染 = 漏掉 NameError/类型错（本次就差点漏 QPolygonF 未导入）。
+_paint_ok = True
+_paint_err = ""
+try:
+    for _ww in (w4, w5, w6):
+        _ww.set_mode("edit")
+        _ww.custom_stashes = [{"x": 480.0, "y": 488.0, "icon": "yolk", "kind": "loose"}]
+        _ww.custom_fridge = [{"x": 1148.0, "y": 260.0, "icon": "watermelon"}]
+        _ww.custom_spawn = (800.0, 400.0)
+        _ww.custom_patrol = (2000.0, 2400.0)
+        _ww.custom_nest = (1500.0, 1700.0)
+        _ww.edit_tool = "food"
+        _ww.grab()                # ⭐ 强制走paintEvent
+        _img = _ww.grab().toImage()
+        _paint_ok = (_img.width() > 0 and _img.height() > 0)
+except Exception as _e:                     # noqa: BLE001 —— 这里要抓任何异常
+    _paint_ok = False
+    _paint_err = "%s: %s" % (type(_e).__name__, _e)
+chk("⑮-15 ⭐⭐ 编辑器 5 类对象全部画得出来（强制 render，⛔ 漏渲染就漏 NameError）",
+    _paint_ok, _paint_err if _paint_err else "render OK")
+
+for _p in (_tp6, _tp8b, _tp9):
+    try:
+        os.remove(_p)
+    except OSError:
+        pass
+
+# ============================================================================
 print()
 print("=" * 74)
 print("  结果：%d 通过 / %d 失败（共 %d 条）" % (len(OK), len(BAD), len(OK) + len(BAD)))
