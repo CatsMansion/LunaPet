@@ -371,14 +371,18 @@ except Exception as _e:                       # noqa: BLE001
 chk("⑭-10 ⭐⭐ 强制 render 不抛异常（三档 × 三阶段 × 双朝向全覆盖）",
     _render_ok, _render_err if _render_err else "render OK")
 
-# ---- 判据 11：三处 _draw_luna 调用点都插了特效（grep 计数）----
+# ---- 判据 11：每个 _draw_luna 调用点都插了特效（grep 计数）----
+# ⭐⭐⭐ PR20（设计端 2026-10-10 签字）：判据语义是「**每个** `_draw_luna` 前后都有 fx」，
+#   正确表达是**三者计数相等**，而不是「恰好 3 个」。
+#   ⛔ 原写法写死 3/3/3 ⇒ PR19 给编辑态加了第 4 个调用点后必然假红，
+#      而「改成 4/4/4」也只挡到下一次 ⇒ 改成相等 + ≥3，**永久免疫**。
 _src = open(os.path.join(HERE, "pet_engine", "night.py"), encoding="utf-8").read()
 _n_behind = _src.count("self._draw_fx_behind(p)")
 _n_front = _src.count("self._draw_fx_front(p)")
 _n_luna = _src.count("self._draw_luna(p)")
-_ok11 = (_n_behind == 3 and _n_front == 3 and _n_luna == 3)
-chk("⑭-11 ⭐⭐ 三处 _draw_luna 调用点都插了特效（behind/front 各 3 次）", _ok11,
-    "behind=%d front=%d luna=%d（期望 3/3/3）"
+_ok11 = (_n_behind == _n_front == _n_luna and _n_luna >= 3)
+chk("⑭-11 ⭐⭐ 每个 _draw_luna 调用点都插了特效（三者计数必须相等）", _ok11,
+    "behind=%d front=%d luna=%d（要求三者相等且 ≥3）"
     % (_n_behind, _n_front, _n_luna))
 # ⭐⭐ 阳性对照：故意数一个不存在的函数名 ⇒ 必须是 0（证明这个计数判据有分辨力）
 chk("⑭-11b ⭐ 阳性对照：不存在的函数名计数必须为 0",

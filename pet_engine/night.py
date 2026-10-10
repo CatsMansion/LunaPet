@@ -135,12 +135,23 @@ CAM_X_DEAD  = 24.0       # 死区半宽：露娜在 cam_x+640±24 内移动 ⇒ 
 CAM_X_CENTER = VW * 0.5  # 视口中心 = 640
 CAM_X_MAX   = WORLD_W - VW      # = 2560
 
-FLOOR_Y = 599               # ⭐⭐ 2026-10-03 按**背景板实测**（派单 42 v3）：
-                            #   设定端程序二次确认（y=580 行内std 13.61 平滑区 →
-                            #   y=600 std 16.11 纹理区）。⛔ 不是执行端初测的 578（那是踢脚线，
-                            #   差 21px 但肉眼极像 —— 最强梯度那条不一定是目标）。
-                            #   ⚠️ 代价：地板只剩 121px 高（原 672 时有 48px），可站面积变大，
-                            #   但吊柜/冰箱能占的高度变多 —— 这正是我们要的（背景板里它们更高）。
+# ⭐⭐ PR16 · 编辑态手动平移速度（px/s）。
+#   ⛔ 与 _step_cam 完全独立：那是 play 路径的「跟随露娜」，
+#      这是 edit 路径的「Ronny 自己挪视野」，两者互不相干。
+#   ⛔ 别设 <400：挪完 3840 宽要 10 秒，难受（派单 §A.1 原话）。
+EDIT_CAM_SPEED = 900.0
+
+FLOOR_Y = 670               # ⭐⭐⭐ 2026-10-10 Ronny 拍板：**地板顶面下移到「画布底往上 50px」**
+                            #   （VH=720 ⇒ 720−50=670；原 599，下移 71px）
+                            #   ⚠️⚠️ **已知代价（Ronny 选的乙案「只改这一个数」）**：
+                            #     `FRIDGE={"x":1120,"y":599,...}` 是**硬编码**、⛔ 不跟 FLOOR_Y 变
+                            #     ⇒ **冰箱会比地板低 71px**（陷进地板）。
+                            #     同理 `LADDERS[0]` 的 ybot 仍是旧值 ⇒ 梯子/桌布底差 71px。
+                            #   ⭐ 为什么敢直接改：实测美术切片 `scene_bg_0.png` 的
+                            #     y=560~712 **全是木地板暖色、一路铺到画布底 720、没有硬边线**
+                            #     ⇒ 视觉上人物**不会陷进墙里**。
+                            #   📌 历史：2026-10-03 按背景板实测定的 599
+                            #     （y=580 平滑区 → y=600 纹理区，非初测的 578 踢脚线）
 NEST_X0, NEST_X1 = 10, 200    # ⭐「阳台」：露娜住的地方（回这里 = 这趟成功）
                               #   Ronny：「左边就是露娜住的阳台」。宽 190px = 0.58m
 # ⛔⛔ 允许区边界**不在这里** —— 它是逐档的（NIGHTS[i]["border_x"]）。
@@ -283,14 +294,27 @@ DEFAULT_FRIDGE_ICON = "watermelon"
 #   任一非 null            ⇒ 导出 **v2 全键**
 #   ⇒ 所以 v1 与 v2 都是**合法**输出，取决于有没有覆盖。
 TERRAIN_JSON_VERSION_V2 = 2     # PR13 的格式（+5 个可覆盖字段）
-# ⭐ **导入时两个都要接受**（v1 缺失的字段按 null 处理）
-TERRAIN_JSON_VERSIONS = (TERRAIN_JSON_VERSION_V1, TERRAIN_JSON_VERSION_V2)
+# ⭐⭐ PR16（B 段，Ronny 2026-10-09 拍板「方案 1」）：地形条目带 `builtin: true`
+#   ⇒ 表示这条是**默认 PLATFORMS 里被改过的**，导出时升 v3。
+#   ⛔ 判据与 `Room.__init__` 用的是**同一个**（`存在任一 builtin 条目`），别搞两套。
+TERRAIN_JSON_VERSION_V3 = 3
+# ⭐⭐ PR23：`border_x`（关卡边界）需要第 4 个版本 —— **不塞进 v3**。
+#   ⛔ 理由：v3 已经有明确语义（= 带 builtin 的地形集），塞进去会让**老 v3 文件
+#      的含义漂移**（同一份文件在不同版本下读出不同的 border_x）。
+TERRAIN_JSON_VERSION_V4 = 4
+# ⭐ **导入时三个都要接受**（旧版本缺失的字段按默认处理）
+TERRAIN_JSON_VERSIONS = (TERRAIN_JSON_VERSION_V1, TERRAIN_JSON_VERSION_V2,
+                         TERRAIN_JSON_VERSION_V3, TERRAIN_JSON_VERSION_V4)
 
 # ⭐⭐ null 语义必须严格区分（派单 §4.1，⛔ 不许合并）：
 #   None / 键缺失 = **不覆盖，用关卡默认**
 #   [] / {}       = **显式设为空**（"这关一个容器都没有"）
 #   ⛔ 合并了就永远无法表达"故意清空" ⇒ 这是语义，不是便利性。
-OVERRIDE_KEYS = ("stashes", "fridge_foods", "spawn", "mw_patrol", "nest")
+# ⭐⭐ PR23：加第 6 个可覆盖字段 `border_x`（关卡边界）。
+#   ⛔ **null 语义与其余 5 类完全一致**：None = 不覆盖（用关卡默认）。
+#      ⛔ 不许拿 0 当"不覆盖" —— 写法必须和其它 5 类一样。
+OVERRIDE_KEYS = ("stashes", "fridge_foods", "spawn", "mw_patrol", "nest",
+                 "border_x")
 
 # ---------------- PR13 · 编辑器 5 个新工具 ----------------
 # ⭐ 工具名 → 中文名 + 快捷键（键位派单 §2.1 已定死，⛔ 别撞 PR12 的 1~6/S/O/C/Z/Del/F2/F4）
@@ -305,6 +329,9 @@ EDIT_TOOLS = (
     ("luna_spawn", "露娜起点", "9"),
     ("mw_patrol",  "巡逻段", "0"),
     ("nest",       "窝区",   "-"),
+    # ⭐⭐ PR23：关卡边界。键位 **B**（PR23 §2.2 实测：1~0/- 与 S/O/C/Z/Del/F2/F4
+    #   /Home/End/PageUp/Down/A/D/←/→ 全占，B 空闲）
+    ("border",     "边界",   "B"),
 )
 # ⭐ 键 → 工具。⛔ 显式建表而不是 `if k == Key_7: ...` 一路if：
 #   那样漏一个键位根本看不出来（正是 PR13 半改时被漏掉的原因）。
@@ -312,11 +339,13 @@ EDIT_TOOL_BY_KEY = {
     Qt.Key_4: "rect", Qt.Key_5: "line", Qt.Key_6: "select",
     Qt.Key_7: "food", Qt.Key_8: "fridge",
     Qt.Key_9: "luna_spawn", Qt.Key_0: "mw_patrol", Qt.Key_Minus: "nest",
+    Qt.Key_B: "border",          # ⭐⭐ PR23 · 关卡边界
 }
 # ⭐ 需要**拖一条水平线段**的工具（点一下没意义，必须有两端）
-EDIT_LINE_TOOLS = ("mw_patrol", "nest")
+# ⭐⭐ PR23：边界也走"拖一条线"的路径（⛔ 竖直线，只取 x）
+EDIT_LINE_TOOLS = ("mw_patrol", "nest", "border")
 # ⭐ 单实例工具（派单 §2.1）：再点一次 = 移动，不是新增
-EDIT_SINGLE_TOOLS = ("luna_spawn", "mw_patrol", "nest")
+EDIT_SINGLE_TOOLS = ("luna_spawn", "mw_patrol", "nest", "border")
 # ⭐ 新放置食物的默认属性（派单 §2.2）
 DEFAULT_FOOD = {"icon": "yolk", "kind": "loose"}
 # ⭐ 三种地面容器的画法颜色（派单 §2.4「按 kind 三色区分」）
@@ -418,6 +447,44 @@ def plat_kind(p, default: str = "solid") -> str:
        猜一个等于把"未知的平台"当成永久地形，静默改变玩法。
     """
     return str(platform_get(p, "kind", default) or default)
+
+
+def table_wall_span(room):
+    """这个 room 里有没有「餐桌/桌布」这一条？⇒ (x0, x1, ytop) 或 None
+
+    ⭐⭐⭐ **PR24 · 本函数存在的唯一理由**（实测踩出来的真 bug）：
+       原来两处布墙直接读**模块常量** `TABLE_X0/TABLE_X1/TABLE_TOP`
+       ⇒ Ronny 把餐桌从地形里删掉，**这堵墙照样在** ⇒ 「删了地形还是出不去」。
+
+    ⛔⛔ **判据不许读 `TABLE_X0/TABLE_X1`**（否则上面那个 bug 原样复发）。
+       只读 `room.platforms`。
+
+    ⭐ **为什么用「顶面高度 + 是否垂到地」，而不是派单建议的「x 重叠 ≥50%」**
+       （工程规约 §3.1 要求先跑示例，我跑了，实测两个问题）：
+       | 输入 | 派单判据 | 本函数 | 哪个对 |
+       |---|---|---|---|
+       | 默认餐桌 (430,488,700,599) | 命中 | 命中 | 都对 |
+       | 只剩地板 (0,599,3840,720) | None | None | 都对 |
+       | **餐桌挪到 x=1500** | **None ❌** | 命中 | **本函数对**（判据 C3 要求墙跟着挪） |
+       | **PR21 零厚水平线 y=488** | **命中 ❌** | None | **本函数对**（线不该变成 400px 宽的墙） |
+
+    ⭐ 判据（两条都要，缺一个就错）：
+       ① 顶面高度 `y0` 在 `TABLE_TOP ± 40`（448~528）⇒ 「这是张桌面」
+       ② **垂到地** `y1 >= FLOOR_Y - 1`⇒ 「它挡路」
+          ⛔ 这条把零厚线排除在外（线 y1==y0，不垂到地）
+    """
+    best = None
+    for p in getattr(room, "platforms", None) or []:
+        x0, y0, x1, y1 = plat_fields(p)
+        if abs(float(y0) - TABLE_TOP) > 40.0:
+            continue
+        if float(y1) < FLOOR_Y - 1.0:
+            continue                      # ⭐ 不垂到地 ⇒ 不挡路（零厚线走这里）
+        _seg = (float(x0), float(x1), float(y0))
+        # 命中多条 ⇒ 取**最宽**的那条（最宽的才是真正挡路的）
+        if best is None or (_seg[1] - _seg[0]) > (best[1] - best[0]):
+            best = _seg
+    return best
 
 
 def plat_valid(p) -> bool:
@@ -568,6 +635,8 @@ def terrain_to_json(terrains, world_w=None, floor_y=None, overrides=None) -> dic
        任一非 None ⇒ 导出 **v2 全键**
        ⛔ 这不是"偷懒兼容"，是**契约**：v1 文件下游脚本按四键解析才不会崩。
     """
+    _has_builtin = False
+
     def _r(v):
         # ⭐ 取整用"四舍五入到整数"，但**保留符号对称性**：
         #   round(-0.5)=0 与 round(0.5)=0 不一致，所以统一走 floor(v+0.5)。
@@ -583,22 +652,34 @@ def terrain_to_json(terrains, world_w=None, floor_y=None, overrides=None) -> dic
             iy1 = iy0
         if abs(float(_xb) - float(_xa)) < _THIN_EPS:
             ix1 = ix0
-        out.append({"kind": plat_kind(p), "x0": ix0, "y0": iy0,
-                    "x1": ix1, "y1": iy1})
+        _e = {"kind": plat_kind(p), "x0": ix0, "y0": iy0, "x1": ix1, "y1": iy1}
+        # ⭐⭐ PR16 · B 段：这条是**被改过的默认平台** ⇒ 打 builtin 标记（v3）
+        if platform_get(p, "builtin"):
+            _e["builtin"] = True
+            _has_builtin = True
+        out.append(_e)
     doc = {
         "version": TERRAIN_JSON_VERSION_V1,
         "world_w": int(WORLD_W if world_w is None else world_w),
         "floor_y": int(FLOOR_Y if floor_y is None else floor_y),
         "terrains": out,
     }
-    # ---- PR13：按需升 v2 ----
+    # ---- PR13：按需升 v2；PR16：有 builtin ⇒ 升 v3 ----
     ov = overrides or {}
     # ⭐⭐ null 语义（§4.1）：**None = 不覆盖**，这才是"导出 v1"的判据。
     #   ⛔ 别把 None 和 [] 混为一谈 —— [] 表示"显式清空"，必须真的写进文件。
     has_any = any(ov.get(k) is not None for k in OVERRIDE_KEYS)
-    if not has_any:
+    if not has_any and not _has_builtin:
         return doc                       # ⭐ v1：四键，不带任何新字段
-    doc["version"] = TERRAIN_JSON_VERSION_V2
+    # ⛔ v3 优先于 v2：v3 文件**也要**写 overrides（可以同时有改过的默认平台 + 食物）
+    # ⭐⭐ PR23：版本优先级 **v4 > v3 > v2 > v1**（一位一增，不跳级）
+    #   ⛔ v4 文件**也要**写全部 overrides（可以同时有 builtin 地形 + 边界 + 食物）
+    if ov.get("border_x") is not None:
+        doc["version"] = TERRAIN_JSON_VERSION_V4
+    elif _has_builtin:
+        doc["version"] = TERRAIN_JSON_VERSION_V3
+    else:
+        doc["version"] = TERRAIN_JSON_VERSION_V2
     _write_overrides(doc, ov)
     return doc
 
@@ -625,6 +706,9 @@ def _write_overrides(doc: dict, ov: dict) -> None:
                              _i_round(ov["mw_patrol"][1])]
     if ov.get("nest") is not None:
         doc["nest"] = [_i_round(ov["nest"][0]), _i_round(ov["nest"][1])]
+    # ⭐⭐ PR23：关卡边界（v4 才有这个键）
+    if ov.get("border_x") is not None:
+        doc["border_x"] = _i_round(ov["border_x"])
 
 
 def _i_round(v):
@@ -661,11 +745,16 @@ def terrain_from_json(data: dict) -> list:
             raise ValueError("terrains[%d].kind=%r 非法（只能是 %s）"
                              % (i, k, "/".join(TERRAIN_KINDS)))
         try:
-            out.append({"kind": k,
-                        "x0": float(t["x0"]), "y0": float(t["y0"]),
-                        "x1": float(t["x1"]), "y1": float(t["y1"])})
+            _e = {"kind": k,
+                  "x0": float(t["x0"]), "y0": float(t["y0"]),
+                  "x1": float(t["x1"]), "y1": float(t["y1"])}
         except KeyError as e:
             raise ValueError("terrains[%d] 缺字段 %s" % (i, e))
+        # ⭐⭐ PR16 · B 段：只有 **v3** 才认 builtin（v1/v2 分支逐字不变，
+        #   保住自测 `:141/:144/:626` 的键集合与 version 断言）。
+        if ver == TERRAIN_JSON_VERSION_V3 and t.get("builtin"):
+            _e["builtin"] = True
+        out.append(_e)
     return out
 
 
@@ -783,6 +872,14 @@ def overrides_from_json(data: dict) -> dict:
     if ns is not None:
         ov["nest"] = _pair(ns, "nest", strict=True)
 
+    # ---- border_x（关卡边界，单实例）· ⭐⭐ PR23 ----
+    #   ⛔⛔ **只认 v4**：v1/v2/v3 的文件里出现 `border_x` 键时**必须忽略**，
+    #      否则手改老文件就能改关卡边界 —— 那会让"v3 的语义"漂移。
+    if ver == TERRAIN_JSON_VERSION_V4:
+        _bx = data.get("border_x")
+        if _bx is not None:
+            ov["border_x"] = _num(_bx, "border_x")
+
     # ⭐ 没出现的键**一律不写进 dict**（而不是写 None）——
     #   因为 Room 要靠"键在不在"区分「不覆盖」与「显式设为空」。
     return ov
@@ -792,15 +889,17 @@ def overrides_from_json(data: dict) -> dict:
 #   ⭐ 底 = FLOOR_Y(599)：冰箱**落地实心** → 它左边的地板才是微波炉巡逻段的东端尽头。
 #   ⭐ 挪右墙后 _at_fridge 回到最自然的语义：「站在冰箱正前方的地板上」，
 #     不再需要「站上茶几桌面」这个由遮挡逼出来的 hack。
-FRIDGE = {"x": 1120, "y": 599, "w": 130, "h": 549}
+FRIDGE = {"x": 1120, "y": FLOOR_Y, "w": 130, "h": 549}
+# ⭐⭐⭐ 2026-10-10 Ronny 拍板：**冰箱也不要了**。
+#   ⛔ **为什么用开关而不是删代码**：FRIDGE 在 8 处被活引用（墙判定 / QTE / 伪平台落点 /
+#      微波炉巡逻右端 / 绘制 / 冰箱食物 / 编辑器放置校验），全删会连带打翻一堆判据。
+#   ⛔ **为什么不用 w/h = 0**：那样判定会退化成「x 到 x 的零宽区间」⇒ 变成一堵隐形墙，
+#      比留着冰箱更难排查。
+#   ⇒ 开关 = 冰箱**整体不存在**（不画、不撞、不放东西、不参与巡逻右端）。
+FRIDGE_ENABLED = False
 # ⭐ 冰箱里的东西（比地面容器多）—— 高风险高回报：它就在微波炉巡逻段的东端尽头
 #   坐标是**冰箱内部格子**（按新冰箱 x1120~1250 重排，不再压在茶几布幔上）
-FRIDGE_FOODS = [
-    {"x": 1148, "y": 260, "icon": "watermelon"},
-    {"x": 1222, "y": 260, "icon": "blueberry"},
-    {"x": 1148, "y": 400, "icon": "pumpkin"},
-    {"x": 1222, "y": 400, "icon": "yogurt"},
-]
+FRIDGE_FOODS = []   # ⭐⭐ Ronny 2026-10-10 授权：容器全清
 
 # ---- QTE 参数（限时按键序列）----
 QTE_TIME_LIMIT = 0.95         # ⭐ 每按一个键的时限（秒）—— 手残也来得及，但不许磨
@@ -929,7 +1028,7 @@ STASHES = [
     {"x": 650,  "y": 488, "icon": "yogurt",   "kind": "jar"},     # 茶几东：唯一 jar
     {"x": 830,  "y": 380, "icon": "salmon",   "kind": "plate"},   # 厨房台西：掀盖
     {"x": 990,  "y": 380, "icon": "chicken",  "kind": "plate"},   # 厨房台东：靠近冰箱
-    {"x": 1000, "y": 599, "icon": "blueberry", "kind": "loose"},  # 地板·冰箱前（绕后拿）
+    {"x": 1000, "y": FLOOR_Y, "icon": "blueberry", "kind": "loose"},  # 地板·冰箱前（绕后拿）
 ]
 
 # ---- 手感常数（**逐档不变**的那些；都是逻辑像素/秒）----
@@ -1198,7 +1297,7 @@ _NIGHT1 = [
     {"x": 660,  "y": 488, "icon": "blueberry", "kind": "loose"},   # 茶几东
     {"x": 820,  "y": 380, "icon": "salmon",    "kind": "plate"},   # 厨房台：掀盖
     {"x": 1000, "y": 380, "icon": "yogurt",    "kind": "jar"},     # ⭐ 唯一 jar，放最东
-    {"x": 900,  "y": 599, "icon": "pumpkin",   "kind": "plate"},   # 地板·台下
+    {"x": 900,  "y": FLOOR_Y, "icon": "pumpkin",   "kind": "plate"},   # 地板·台下
 ]
 _NIGHT2 = list(STASHES)
 _NIGHT3 = [
@@ -1210,8 +1309,8 @@ _NIGHT3 = [
     {"x": 800,  "y": 380, "icon": "chicken",    "kind": "plate"},
     {"x": 900,  "y": 380, "icon": "yogurt",     "kind": "jar"},    # ⭐ jar
     {"x": 1020, "y": 380, "icon": "pumpkin",    "kind": "plate"},
-    {"x": 830,  "y": 599, "icon": "blueberry",  "kind": "loose"},  # 地板：绕后拿
-    {"x": 1060, "y": 599, "icon": "watermelon", "kind": "jar"},    # ⭐ jar（全图最深，冰箱脚下）
+    {"x": 830,  "y": FLOOR_Y, "icon": "blueberry",  "kind": "loose"},  # 地板：绕后拿
+    {"x": 1060, "y": FLOOR_Y, "icon": "watermelon", "kind": "jar"},    # ⭐ jar（全图最深，冰箱脚下）
 ]
 
 # ============================================================================
@@ -1238,7 +1337,7 @@ NIGHTS = [
         #      这是按设计端转述逐字落的。⏳ 若 Ronny 要的是全角「～」，
         #      只改这一个字符。
         "sub": "阳光正好，他在打盹。我来看看屋里有什么吃的~",
-        "stashes": _NIGHT3,
+        "stashes": [],   # ⭐⭐ Ronny 2026-10-10 授权：容器全清，之后再说
         "border_x": 360,
         # ⭐ 东端收到 1180：冰箱移到 1120~1250 之后，巡逻右端**不能进冰箱体**
         #   （冰箱是落地实心，y1=599 —— 与旧茶几同性质，会穿模）。
@@ -1476,12 +1575,15 @@ class Luna:
             #   漏了的话玩家按住 D 冲刺会**直接穿过桌布**进餐桌里，
             #   而桌布是实心墙（渲染上是垂到地的整面布），穿模一眼假。
             #   判据与常速移动完全一致（prev_x 不在区里、这一帧进了区→ 钉回墙边）。
-            if self.y > TABLE_TOP + LAND_TOL:
+            # ⭐⭐ PR24：布墙改**跟着地形走**（⛔ 原来读 TABLE_X0/X1 常量 ⇒ 删了地形照样撞）
+            _w = table_wall_span(room)
+            if _w is not None and self.y > _w[2] + LAND_TOL:
                 m = BODY_W * 0.35
-                _hit = lambda px: px + m > TABLE_X0 and px - m < TABLE_X1
+                _wx0, _wx1 = _w[0], _w[1]
+                _hit = lambda px: px + m > _wx0 and px - m < _wx1
                 if _hit(self.x) and not _hit(prev_x):
-                    self.x = (float(TABLE_X0 - m) if prev_x < TABLE_X0
-                              else float(TABLE_X1 + m))
+                    self.x = (float(_wx0 - m) if prev_x < _wx0
+                              else float(_wx1 + m))
                     self.dash_t = 0.0          # 撞墙 = 冲刺结束（不给"贴墙滑行"）
             self._clamp_x(room)
             return
@@ -1610,10 +1712,14 @@ class Luna:
         # ⭐ m 必须在**两个墙判定之外**赋值：冰箱墙那段的 y 条件是"在地板层"，
         #   与茶几布墙的 y 条件互斥，早先写在布墙分支里 → 冰箱分支取不到 → NameError。
         m = BODY_W * 0.35
-        if self.y > TABLE_TOP + LAND_TOL:
-            _hit = lambda px: px + m > TABLE_X0 and px - m < TABLE_X1
+        # ⭐⭐ PR24：布墙改**跟着地形走**（⛔ 原来读 TABLE_X0/X1 常量 ⇒ 删了地形照样撞）
+        #   ⛔ y 条件与 x 区间**都**来自 `_w`，⛔ 不留 TABLE_TOP 半截旧逻辑（派单 §2.2）
+        _w = table_wall_span(room)
+        if _w is not None and self.y > _w[2] + LAND_TOL:
+            _wx0, _wx1 = _w[0], _w[1]
+            _hit = lambda px: px + m > _wx0 and px - m < _wx1
             if _hit(self.x) and not _hit(prev_x):
-                self.x = float(TABLE_X0 - m) if prev_x < TABLE_X0 else float(TABLE_X1 + m)
+                self.x = float(_wx0 - m) if prev_x < _wx0 else float(_wx1 + m)
                 if abs(self.vx) > 1.0:
                     self.vx = 0.0        # 顶住墙就别再攒速度
 
@@ -1636,8 +1742,10 @@ class Luna:
         #     钉回时再按 m 留出身体半宽。电平判定不怕慢速，也不怕实体窄。
         #   ⛔ y 条件必须排除「站在冰箱顶上」：顶上 y≈_fy_top，此时中心也在 1120~1250 内，
         #     不排除就会把站在冰箱上的人判成"撞墙"给弹回地板。
-        _fx0, _fx1 = float(FRIDGE["x"]), float(FRIDGE["x"] + FRIDGE["w"])
-        _fy_top = FLOOR_Y - FRIDGE["h"]
+        # ⭐⭐ PR25（2026-10-10）：FRIDGE_ENABLED=False ⇒ **没有冰箱墙**。
+        #   ⛔ 下面整段必须**真跳过**，不能把 w 改成 0 ⇒ 那会变成一堵「隐形墙」。
+        _fx0, _fx1 = 0.0, 0.0
+        _fy_top = FLOOR_Y - FRIDGE["h"] if FRIDGE_ENABLED else 1e9
         if _fy_top + LAND_TOL < self.y < FLOOR_Y + LAND_TOL \
                 and _fx0 <= self.x <= _fx1:
             self.x = float(_fx0 - m) if self.x - _fx0 < _fx1 - self.x else float(_fx1 + m)
@@ -2510,8 +2618,18 @@ class Room:
         #     出问题时**没法判断这次传的到底是哪种** ⇒ 判据会静默测错对象。
         #     两处职责不同：custom = 地形（list）；overrides = 食物/起点/窝（dict）。
         self.custom = None
-        self.platforms = platform_dicts(PLATFORMS) if custom is None \
-            else platform_dicts(PLATFORMS) + sanitize_platforms(custom, "自定义地形")
+        # ⭐⭐⭐ PR16 · B 段（Ronny 拍板「方案 1 · 全集模式」）：
+        #   custom 里**存在任一 builtin 条目** ⇒ 它**替换**默认 PLATFORMS，不是追加。
+        #   ⛔ 判据与 `terrain_to_json` 升 v3 用的是**同一个**，别搞两套。
+        #   ⛔ 不写 `custom is None` 之外的分支 —— 没 builtin 时行为**逐字不变**
+        #      （自测 `:104` 断言 `Room(None).platforms` 长度 == 4）。
+        _custom = list(custom) if custom else []
+        _has_builtin = any(bool(platform_get(t, "builtin")) for t in _custom)
+        if _has_builtin:
+            self.platforms = sanitize_platforms(_custom, "自定义地形")
+        else:
+            self.platforms = platform_dicts(PLATFORMS) \
+                + sanitize_platforms(_custom, "自定义地形")
         # ⭐ overrides 的**原样副本**（编辑器要拿它导出 JSON，也给自测看"用户到底设了什么"）
         #   ⛔ 必须**拷贝**：调用方若之后改了自己的 dict，room 里的不能跟着变。
         self.overrides = dict(overrides) if overrides else {}
@@ -2575,7 +2693,11 @@ class Room:
                 value=spec["value"], hit=spec["hit"],
                 taken=False, broken=False))
         self.stashes = stashes
-        self.border_x = float(cfg["border_x"])     # ⭐ 允许区边界随档位变
+        # ⭐ 允许区边界随档位变；⭐⭐ PR23：可被 override（编辑器里拖出来）。
+        #   ⛔ null 语义：`None` = 不覆盖 ⇒ 用关卡默认（360 / 1080 / 1500 ...）。
+        self.border_x = (float(ov["border_x"])
+                         if ov.get("border_x") is not None
+                         else float(cfg["border_x"]))
         # ⭐⭐⭐ PR13：mw_patrol **激活它**（PR12 时它是死字段：只有写、没有读）。
         #   ⛔⛔ 只改起点不改 patrol 是**没用的**——他巡逻一圈就走回原区间
         #   （派单 §1.3）。所以本单做的是「巡逻段」，起点自动 = 中点，两者永远一致。
@@ -2782,10 +2904,19 @@ class NightWindow(QWidget):
         #   ⛔ play_custom 必须有 —— 否则改完得重启才知道对不对（派单原话）。
         self.mode = "play"
         self.custom_terrains = []        # ⭐ 只放**自定义层**，默认 4 平台永远不进来
+        # ⭐⭐⭐ PR16 · B 段：默认 4 平台（PLATFORMS）的**编辑副本**。
+        #   None = **未接管**（用常量本身，导出不会被冻结）；list = 已接管（带 builtin:True）。
+        #   ⛔ 为什么不按派单 §B.2「进 edit 就 copy 进 custom_terrains」：
+        #      实测会撞翻 4 条既有判据（⑨-4 / ⑨-9 / ⑨-11 / ⑮-10），
+        #      而 §D 明令 `_自测_*.py` 一个字不许改 ⇒ 改成**懒接管**：
+        #      Ronny 真动手改默认平台时才落盘，没动过就与 PLATFORMS 常量保持同步。
+        self.builtin_terrains = None
         self.edit_tool = "rect"# rect | line | select | food | fridge
                                             # | luna_spawn | mw_patrol | nest
         self.edit_kind = "solid"          # 当前要画的类型
-        self.edit_sel = -1                # 选中项在 custom_terrains 里的下标， -1 = 没选
+        # ⭐ PR17 · P2-1：PR16 之后下标是**统一列表** `_edit_all()` 的
+        #   （自定义层在前、默认 4 条在后），⛔ 不再是 `custom_terrains` 的下标。
+        self.edit_sel = -1                # 选中项在 `_edit_all()` 里的下标， -1 = 没选
         # ⭐⭐⭐ PR13 · 五类可编辑对象的编辑器态（派单 §2.1）
         #   ⭐ 全是 None = **不覆盖**（null 语义，§4.1）。
         #   ⛔ 别把它们初始化成"默认值的副本"—— 那就分不清
@@ -2795,16 +2926,60 @@ class NightWindow(QWidget):
         self.custom_spawn = None          # tuple(x, y) | None
         self.custom_patrol = None         # (p0, p1) | None
         self.custom_nest = None           # (x0, x1) | None
+        # ⭐⭐ PR23：关卡边界（单实例）。None = 不覆盖 ⇒ 用关卡默认。
+        #   ⛔ 它是**微波炉的行为边界**（越界才"看见/追"露娜），⛔ **不限制露娜移动**。
+        self.custom_border = None                 # float | None
         # ⭐ 选中态：食物用 ("food", 下标) / 单实例用 ("spawn", -1) 之类
         #   ⛔ 用元组而不是裸下标 —— 否则"第 3 个地形"和"第 3 个食物"分不清。
         self.edit_sel_obj = None
         self._drag = None                 # 拖拽中：(x0,y0,x1,y1) 屏幕->世界
         self._drag_shift = False          # ⭐ 按下那一刻的 Shift 状态（直线轴对齐用）
+        # ⭐⭐ PR16 · 拖动**已有**地形（与 `_drag`=画新地形 是两条独立路径）
+        self._move_from = None            # 按下时的世界坐标 (wx, wy)
+        self._move_orig = None            # 按下时该块地形的**拷贝**（⛔ 不存引用，否则改的就是源）
+        self._move_snap = False           # 这次拖动是否已进过撤销栈（⛔ 一次拖动只存一份）
         self._confirm_clear = False        # ⛔ 清空二次确认：按一下只提示，再按才真删
         self._undo = []                   # 撤销栈（每次改动前push 一份快照）
         # ⭐ 存档路径（派单 §六 Q6「你定，报我」）—— 放在引擎根的 assets_game 下，
         #   ⛔ 不写进 dist/_internal（那是打包产物，重打包会被覆盖）。
         self.terrain_path = os.path.join(GAME_ASSETS, "custom_terrain.json")
+        # ⭐⭐⭐ PR17 · P0：启动时**自动导入**上次存下来的自定义地形。
+        #   ⛔ 根因（派单 §0.1，我复核过）：导出一直是好的，坏的是"读" ——
+        #      文件写下来了，但启动时从不加载 ⇒ Ronny 关掉游戏再开 = 白干。
+        #   ⛔⛔⛔ 为什么**必须放 `__init__`**（派单 §P0.1 是对的，我一度想挪走）：
+        #      真实入口有三条 —— ① `night.start()` ② **`gamehub.py:271` 直接
+        #      `w = W(self.pack)`**（从 LunaPet 主界面点「深夜厨房」走这条）
+        #      ③ `pet_launcher.py` 的 `--selftest-game`。
+        #      ② 那个文件是**六把锁之一，一个字不许改** ⇒ 只有 `__init__`
+        #      能同时覆盖①②③。挪到 `start()` 会让主界面进游戏时读不到存档。
+        #
+        #   ⛔⛔ 但**无头环境（offscreen）必须跳过** —— 这是测试隔离，实测过：
+        #      自测全都直接 `NightWindow(pack)` 构造窗口，若这里读用户存档，
+        #      Ronny 一旦存了地形，_自测_自定义地形.py 的 ⑨-2/⑨-4/⑨-5/⑨-6/⑨-9/⑨-11
+        #      与 _自测_夜间.py 的 2 条会一起变红（数字见回执 PR17）。
+        #      ⭐ 真机是**窗口模式**，一定会加载（判据 ⑲-10 用伪造
+        #      QT_QPA_PLATFORM=windows 验证过）。
+        #      ⛔ 无头环境（offscreen）恒跳过 —— 这是测试隔离，别删。
+        #      ⛔⛔ 本条件是 **AND**（设计端 PR20 实测指出，原注释在骗人）：
+        #         `NIGHT_AUTOLOAD=1` 也**不能**在无头下强制加载
+        #         —— 两个条件必须同时成立。它只能用来**关掉**（=0），不能用来打开。
+        #      ⛔⚠️ 真机必须在【启动 bat】里 `set QT_QPA_PLATFORM=windows`：
+        #         `gamehub.py:27` 与 `hundred.py:69` 在 **import 时**就
+        #         `os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")`。
+        #         实测：`启动游戏.bat` / `启动桌宠.bat` / `直接开玩.bat` 都设了 windows ✅；
+        #         `_启动游戏主界面.py` 自己 pop 掉再设 windows ✅；
+        #         ⛔ 但 **`打包.bat` 没有设** ⇒ 打包后的 LunaPet.exe 走 gamehub 延迟 import
+        #         那条路时，本闸门**恒假 ⇒ 存档不会自动加载**（未处理，见回执 PR20）。
+        # ⭐⭐⭐ PR21 · A1：存档加载状态。**四态**，⛔ 不许用"有没有 loaded 字段"两态——
+        #   「根本没有存档文件」和「有存档但这次没载入」是两件事，混起来
+        #   Ronny 永远不知道自己是不是"没加载"（PR21 §0.1 的原始困惑）。
+        #   absent=没有存档文件 / present=有但没载入 / loaded=已载入 / bad=读坏了
+        self._save_state = ("present" if os.path.isfile(self.terrain_path)
+                            else "absent")
+        self._warned_save = False         # A1-2 的"只提示一次"闸
+        if (os.environ.get("NIGHT_AUTOLOAD") != "0"
+                and os.environ.get("QT_QPA_PLATFORM", "") != "offscreen"):
+            self._autoload_terrain()
         # ============ PR14 · 攻击特效 ============
         # ⭐ 特效列表挂在窗口上，⛔ **不用全局变量**（多窗口/重入会互相污染）。
         self.fx = []
@@ -2828,6 +3003,8 @@ class NightWindow(QWidget):
             ov["mw_patrol"] = tuple(self.custom_patrol)
         if self.custom_nest is not None:
             ov["nest"] = tuple(self.custom_nest)
+        if self.custom_border is not None:      # ⭐⭐ PR23
+            ov["border_x"] = float(self.custom_border)
         return ov
 
     # ---------------- PR13 · 编辑器 · 5 类新对象的放置 / 删除 ----------------
@@ -2884,6 +3061,8 @@ class NightWindow(QWidget):
            冰箱坐标**不写死** —— 从 FRIDGE 常量读，跟着关卡数据走。
         """
         x, y = float(wx), float(wy)
+        if not FRIDGE_ENABLED:
+            return self._edit_refuse("这个关卡没有冰箱")
         fx0, fy = float(FRIDGE["x"]), float(FRIDGE["y"])
         fx1 = fx0 + float(FRIDGE["w"])
         fy0 = fy - float(FRIDGE["h"])
@@ -2939,6 +3118,24 @@ class NightWindow(QWidget):
         ⛔ p0 >= p1 ⇒ 拒（退化成点 = 无意义）。
         """
         a, b = sorted((float(wx0), float(wx1)))
+        # ⭐⭐ PR23 · 关卡边界：**竖直**拖一条线，只取 x（y 一律忽略）。
+        #   ⛔ 与巡逻段/窝区分开 —— 它们要"有长度的水平线段"，边界只要一个 x。
+        #   ⭐ 夹取口径（派单 §4② 默认建议，未收到异议）：[露娜半宽+8, WORLD_W]
+        #      下限理由：边界小于身体半宽时露娜一出生就在界外 ⇒ 微波炉立刻警觉。
+        if tool == "border":
+            _x = float(wx0)
+            _lo = BODY_W * 0.5 + 8.0
+            _hi = float(WORLD_W)
+            if not (_lo <= _x <= _hi):
+                return self._edit_refuse(
+                    "边界要落在 %.0f ~ %d 之间（太小会让露娜一出生就在界外）"
+                    % (_lo, int(_hi)))
+            self.edit_snapshot()
+            self.custom_border = _x
+            self.edit_sel_obj = ("border", -1)
+            self._apply_overrides_now()
+            self.update()
+            return True
         if abs(b - a) < 4.0:
             return self._edit_refuse("要拖出一条**有长度**的线段（现在几乎是点）")
         if not (0.0 <= a and b <= float(WORLD_W)):
@@ -2980,7 +3177,7 @@ class NightWindow(QWidget):
               只按新 patrol 重算他的**初始 x/y**。
         ⭐ `mw` 可能还不存在（构造早期就调了本函数）⇒ getattr 兜底。
         """
-        self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+        self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
                          overrides=self._collect_overrides())
         _mw = getattr(self, "mw", None)
         if _mw is not None:
@@ -2994,8 +3191,32 @@ class NightWindow(QWidget):
            少一个编辑器状态，且符合"放→选中→调属性"的直觉。
         ⛔ 循环里只在白名单内转（FOOD_ICONS / FOOD_KINDS）——
            越界会让 `self.icons.get()` 取到 None ⇒ 绘制崩。
+
+        ⭐⭐ PR27（2026-10-10 Ronny）：`.` `,` **也能改选中地形的 kind**。
+        ⛔ 为什么必须能：攀爬面**只认 `kind="climb"`**（`Room.__init__` 只把 climb
+        收进 `ladder_zones`）⇒ 画的时候选了 solid 的竖条，事后改不了 kind 就
+        **永远爬不了**。Ronny 实测：19 条全是 solid，`ladder_zones` 里一条 climb 都没有。
         """
         sel = self.edit_sel_obj
+        # ⭐⭐ 地形分支（选中的是地形，不是食物）
+        if not sel and 0 <= self.edit_sel < len(self._edit_all()):
+            if which != "kind":
+                return self._edit_refuse("地形只能改 kind（, . 键）")
+            i = self.edit_sel
+            _t = self._edit_all()[i]
+            if self._is_floor_sel(i):
+                return self._edit_refuse("默认地板不能改 kind（PR16 R3）")
+            self.edit_snapshot()
+            _seq = list(TERRAIN_KINDS)
+            _j = _seq.index(plat_kind(_t)) if plat_kind(_t) in _seq else 0
+            _nk = _seq[(_j + 1) % len(_seq)]
+            _nt = dict(_t)
+            _nt["kind"] = _nk
+            self._edit_write_at(i, _nt)
+            self._apply_overrides_now()
+            self.msg, self.msg_t = "第 %d 块地形 kind → %s" % (i, _nk), 3.0
+            self.update()
+            return True
         if not sel or sel[0] != "food":
             return self._edit_refuse("先选中一个食物（用 6 选择工具点它）")
         i = sel[1]
@@ -3038,21 +3259,28 @@ class NightWindow(QWidget):
         #   ⭐ `overrides` 空 dict ⇒ Room 各字段取默认值 ⇒ 与改动前逐字相同。
         _ov = self._collect_overrides()
         if m == "play":
-            # 回正常游戏 ⇒ 用**默认**地形（自定义层不带进去）
-            self.room = Room(NIGHTS[self.night_idx], overrides=_ov)
+            # ⭐⭐⭐ PR18（设计端签字）：`play` **也吃**自定义地形 —— 与 `start_night`
+            #   / `play_custom` 三条路径口径**完全一致**。
+            #   ⛔ 改前是 `Room(..., overrides=_ov)`（不带 custom）⇒ 从编辑器按 F2
+            #      退出，露娜眼前的地形**当场消失**（就是 Ronny 报的「存了但没了」）。
+            #   ⛔⛔ 必须用 `self._room_custom()`（含已接管的 `builtin_terrains`），
+            #      ⛔ 不是 `self.custom_terrains` —— 后者会漏掉被 Ronny 改过的默认平台
+            #      （比如他把桌布 y1 从 599 改成 520），改了就白改。
+            self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
+                             overrides=_ov)
             self.luna.x, self.luna.y = self.room.spawn_luna
             self.luna.vy = 0.0
             self.luna.on_ground = True
         elif m == "play_custom":
             # ⭐ 用自定义地形试跑：编辑中的地形**立刻在画面上呈现**（派单 §3.2）
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+            self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
                              overrides=_ov)
             self.luna.x, self.luna.y = self.room.spawn_luna
             self.luna.vy = 0.0
             self.luna.on_ground = True
         elif m == "edit":
             # 编辑态：地形常驻可见，但**不跑物理**（_tick 里按 mode 分流）
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+            self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
                              overrides=_ov)
         self.phase = "menu" if m == "edit" else self.phase
         self.update()
@@ -3066,6 +3294,11 @@ class NightWindow(QWidget):
         """
         self._undo.append({
             "terrains": [dict(t) for t in self.custom_terrains],
+            # ⭐⭐ PR16 · B 段：默认平台也要能撤（改了桌布 y1 之后 Ctrl+Z 要退得回去）
+            "builtins": None if self.builtin_terrains is None
+                        else [dict(t) for t in self.builtin_terrains],
+            # ⭐⭐ PR23：关卡边界也要能撤
+            "border": self.custom_border,
             "stashes": None if self.custom_stashes is None
             else [dict(s) for s in self.custom_stashes],
             "fridge": None if self.custom_fridge is None
@@ -3086,13 +3319,17 @@ class NightWindow(QWidget):
             return False
         snap = self._undo.pop()
         self.custom_terrains = snap["terrains"]
+        # ⭐ PR16 · B 段：`.get` 而不是 `[]` —— 老快照（PR12/13 存的）没有这个键
+        self.builtin_terrains = snap.get("builtins")
+        # ⭐⭐ PR23 · `.get` 兼容 PR16 之前的老快照（没有这个键）
+        self.custom_border = snap.get("border")
         self.custom_stashes = snap["stashes"]
         self.custom_fridge = snap["fridge"]
         self.custom_spawn = snap["spawn"]
         self.custom_patrol = snap["patrol"]
         self.custom_nest = snap["nest"]
         if self.mode in ("edit", "play_custom"):
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+            self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
                              overrides=self._collect_overrides())
         self.update()
         return True
@@ -3112,13 +3349,17 @@ class NightWindow(QWidget):
         """
         self.edit_snapshot()
         self.custom_terrains = []
+        # ⭐ PR16 · B 段：清空 = **回到出厂默认** ⇒ 默认平台也放弃接管
+        self.builtin_terrains = None
         self.custom_stashes = None
         self.custom_fridge = None
         self.custom_spawn = None
         self.custom_patrol = None
         self.custom_nest = None
+        # ⭐⭐ PR23：清空 = 边界也回到关卡默认（None = 不覆盖）
+        self.custom_border = None
         if self.mode in ("edit", "play_custom"):
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+            self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
                              overrides=self._collect_overrides())
         self.update()
 
@@ -3130,7 +3371,7 @@ class NightWindow(QWidget):
         #   「全 None ⇒ 导 v1 四键」分支，**用户在编辑器里放的食物会被丢掉**，
         #   而且⛔ **不报错**（文件照样生成，只是少几个键）。
         #   这就是「静默丢数据」：用户以为存下来了，重新打开是空的。
-        data = terrain_to_json(self.custom_terrains, overrides=self._collect_overrides())
+        data = terrain_to_json(self._room_custom(), overrides=self._collect_overrides())
         with open(p, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         return p
@@ -3154,7 +3395,12 @@ class NightWindow(QWidget):
         ts = terrain_from_json(data)
         ov = overrides_from_json(data)      # ⛔ 非法就抛，抛在改动之前
         self.edit_snapshot()
-        self.custom_terrains = ts
+        # ⭐⭐ PR16 · B 段：v3 里的 builtin 条目**分桶**进 `builtin_terrains`，
+        #   其余进 `custom_terrains`。⛔ 没有 builtin ⇒ 设回 None（= 未接管，
+        #   v1/v2 老文件行为**逐字不变**）。
+        _bl = [t for t in ts if platform_get(t, "builtin")]
+        self.builtin_terrains = _bl if _bl else None
+        self.custom_terrains = [t for t in ts if not platform_get(t, "builtin")]
         # ⭐ v1 文件 ⇒ overrides_from_json 返回全 None 的 dict
         #   ⇒ 5 类字段复位成 None（不是覆盖，是「回到关卡默认」），与 PR12 行为一致。
         self.custom_stashes = ov.get("stashes")
@@ -3163,11 +3409,87 @@ class NightWindow(QWidget):
         self.custom_spawn = tuple(_sp["luna"]) if _sp else None
         self.custom_patrol = ov.get("mw_patrol")
         self.custom_nest = ov.get("nest")
+        # ⭐⭐ PR23：⛔ 只有 v4 才会带 border_x（`overrides_from_json` 已按版本过滤）
+        _bd = ov.get("border_x")
+        self.custom_border = None if _bd is None else float(_bd)
         if self.mode in ("edit", "play_custom"):
-            self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+            self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
                              overrides=self._collect_overrides())
         self.update()
         return len(ts)
+
+    # ⭐⭐⭐ PR17 · P0 · 启动时自动导入
+    def _save_status_cn(self) -> str:
+        """PR21 · A1：存档状态的中文说明（工具栏那行用）。⇒ 四态各有各的话。
+
+        ⭐ 为什么要「四态」而不是「载入 / 没载入」两态（PR21 §0.1 的原始困惑）：
+           「压根没有存档文件」和「有存档但这次没加载」在画面上**长得一样**
+           （都是那 4 条出厂默认平台）⇒ 混成两态时 Ronny 分不清自己是不是"没加载"。
+        """
+        if self._save_state == "loaded":
+            return "存档 √ 已载入 %d 条" % len(self._room_custom())
+        if self._save_state == "bad":
+            return "存档 ⚠ 读不出来（已按出厂默认继续）"
+        if self._save_state == "present":
+            return ("存档 ⚠ 未载入（当前显示出厂默认 4 条，"
+                    "改完记得按 S 导出）")
+        return "存档 —（还没有存档文件，按 S 导出）"
+
+    def _warn_save_not_loaded(self) -> None:
+        """PR21 · A1-2：进游戏时若「有存档但这次没载入」⇒ 提示一次（只一次）。
+
+        ⛔ 为什么要这条：编辑器工具栏那个提示只在 F2 之后才看得见，
+           而 Ronny 的原话是「**进游戏**看到旧地形」⇒ 不在游戏里说一声，他永远不知道。
+        ⛔ 只提示一次（`_warned_save`）：否则每次 `start_night` 都弹，烦到要屏蔽。
+        """
+        if self._warned_save or self._save_state != "present":
+            return
+        self._warned_save = True
+        self.msg = ("⚠️ 自定义地形存档没载入，本次按出厂默认 4 条玩"
+                    "（编辑器里按 O 可手动载入）")
+        self.msg_t = 6.0
+
+    def _autoload_terrain(self):
+        """启动时读一次 `custom_terrain.json`（= 上次按 S 存下来的）。
+
+        ⛔⛔ **必须 try/except 包住并 print**：`import_terrain` 是「非法就抛」的设计
+           （PR13 定的，理由是「静默 = 用户以为导入了其实没有」），
+           而**启动时抛异常 = 游戏直接打不开** ⇒ 只能在**调用点**包，不能改它的语义。
+
+        | 情况 | 处理 | 理由 |
+        |---|---|---|
+        | 文件不存在 | **静默**跳过（不 print） | 首次运行本来就没有，每次启动刷一行报错很烦 |
+        | 解析失败 | **print 告警** + 复位成空状态 | ⛔ 不许静默（Ronny 铁律）；也不许留半截数据 |
+        | 成功 | 不弹提示、不重建 Room | 启动时 `mode == "play"`，`import_terrain` 本来就不重建 |
+
+        ⭐⭐ 成功后**清空撤销栈**：否则 Ronny 一进编辑器按 Ctrl+Z，
+           会把刚自动加载进来的地形全撤掉（看起来像"存档丢了"）。
+        """
+        if not os.path.exists(self.terrain_path):
+            self._save_state = "absent"
+            return
+        try:
+            self.import_terrain(self.terrain_path)
+        except Exception as e:                       # noqa: BLE001
+            print("[夜间] ⚠️ 自定义地形存档读不出来，已按「空」继续"
+                  "（不影响正常开局）：%s: %s" % (type(e).__name__, e))
+            # ⛔ 解析失败 ⇒ 复位成**空状态**（不是留着半截数据）
+            self.custom_terrains = []
+            self.builtin_terrains = None
+            self.custom_stashes = None
+            self.custom_fridge = None
+            self.custom_spawn = None
+            self.custom_patrol = None
+            self.custom_nest = None
+            self._undo = []
+            self._save_state = "bad"
+            # ⭐ PR20 · B3：光 print 不够 —— Ronny 看不到控制台。
+            #   ⛔ 不弹模态框（会挡游戏）；⭐ 6 秒（默认 2~3 秒读不完）。
+            self.msg = "⚠️ 自定义地形存档读不出来，本次按默认关卡玩"
+            self.msg_t = 6.0
+            return
+        self._undo = []                              # ⭐ 见上面的理由
+        self._save_state = "loaded"
 
     def _edit_add(self, x0, y0, x1, y1, kind=None, line=False, shift=False) -> bool:
         """加一块自定义地形。⇒ 是否成功。
@@ -3183,10 +3505,23 @@ class NightWindow(QWidget):
                            斜线会破坏落地判定的顶面假设，本版不支持）
         """
         k = kind or self.edit_kind
-        if line and shift:
+        if line:
             dx = abs(float(x1) - float(x0))
             dy = abs(float(y1) - float(y0))
-            if dx >= dy:
+            # ⭐⭐ PR21 · A2：直线工具**默认就画零厚线**（⛔ 不再按 shift 分叉）。
+            #   理由三条（设计端裁定）：① 工具名叫「直线」画出来不是直线 = 命名与行为不符；
+            #   ② 3px 渲染像线、物理是矩形 ⇒ 会误导落地判定，不只是不好看；
+            #   ③ 零厚线是本项目**已验证**的机制（桌布/挂毯攀爬面）。
+            #   ⭐ Shift 的**新语义 = 强制另一轴**（不自然，但想画就按）。
+            #   ⛔⛔ **幂等**（实测踩过）：鼠标路径上 `mouseMoveEvent` 的预览**已经翻过一次**
+            #      ⇒ `_drag` 送进来已经是轴对齐的。这里若再翻一次 ⇒ 零长
+            #      （主轴 0 < 4）⇒ `_edit_add` 返回 False ⇒ **「直线+Shift 拖了却什么都没画」**。
+            #      ⇒ 输入已是零厚时**不再翻转**，只按原朝向采用。
+            _already_thin = (dx < _THIN_EPS or dy < _THIN_EPS)
+            _horiz = (dx >= dy)
+            if shift and not _already_thin:
+                _horiz = not _horiz
+            if _horiz:
                 # ⭐ 水平线：y 相同（零厚）。y 取**起点** y（不是平均）
                 #   —— 直线是"一条"，没有厚度，取起点才与手画的位置一致。
                 xa, xb = min(float(x0), float(x1)), max(float(x0), float(x1))
@@ -3200,7 +3535,8 @@ class NightWindow(QWidget):
             ya, yb = (min(y0, y1), max(y0, y1))
         # ⛔⛔ **主轴不做任何补齐** —— 零厚必须真的是零厚（理由见 EDIT_MIN 处的注释）
         # ⭐ 只做**边界夹取**：直线可能被拖到地板线以下/世界外
-        _thin = bool(line and shift)
+        # ⭐ PR21 · A2：零厚判据也跟着改成 `line` 即可（⛔ 不再 `line and shift`）
+        _thin = bool(line)
         xa = max(0.0, min(xa, float(WORLD_W)))
         xb = max(0.0, min(xb, float(WORLD_W)))
         ya = max(0.0, min(ya, FLOOR_Y))
@@ -3221,12 +3557,77 @@ class NightWindow(QWidget):
         self.custom_terrains.append(
             {"kind": k, "x0": float(xa), "y0": float(ya),
              "x1": float(xb), "y1": float(yb)})
-        self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains)
+        self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom())
         self.update()
         return True
 
+    # ---------------- PR16 · B 段 · 默认平台的「统一列表」 ----------------
+
+    def _edit_all(self) -> list:
+        """编辑器里**全部可编辑的地形** ⇒ 自定义层在前，默认 4 条在后。
+
+        ⛔⛔ 顺序**不能反**：既有判据 ⑨-9 断言「点中第一块自定义地形 ⇒ 下标 0」，
+            默认层放前面的话那块就变成下标 4，判据红。
+        ⛔ 未接管时返回的是 PLATFORMS 的**临时副本**（带 builtin 标记），
+           只用于命中/读取；要写回必须先 `_edit_takeover()`。
+        """
+        bl = self.builtin_terrains
+        if bl is None:
+            bl = [dict(t) for t in platform_dicts(PLATFORMS)]
+            for t in bl:
+                t["builtin"] = True
+        return self.custom_terrains + bl
+
+    def _room_custom(self) -> list:
+        """传给 `Room(custom=...)` 的列表。⛔ builtin 排**前面**
+           ⇒ `Room.platforms` 的顺序与默认 PLATFORMS 一致（下游按坐标判贴图，别乱序）。"""
+        if self.builtin_terrains is None:
+            return self.custom_terrains
+        return self.builtin_terrains + self.custom_terrains
+
+    def _edit_takeover(self) -> bool:
+        """接管默认 4 条（把它们 copy 进 `builtin_terrains`）。⇒ 是否**刚**接管。
+
+        ⭐ 懒接管：Ronny 没动过默认平台 ⇒ 一直是 None ⇒ 导出仍是 v1/v2，
+           PLATFORMS 常量以后改了，他的存档**会跟着更新**（派单方案 1 的缺点被绕开）。
+        """
+        if self.builtin_terrains is not None:
+            return False
+        self.builtin_terrains = [dict(t) for t in platform_dicts(PLATFORMS)]
+        for t in self.builtin_terrains:
+            t["builtin"] = True
+        return True
+
+    def _is_floor_sel(self, i: int) -> bool:
+        """统一列表第 i 项是不是**默认地板**？⇒ R3（Ronny 拍板）：禁删、禁改 kind。
+
+        ⭐ 判据 = 「默认层的**第一条**」：接管时按 PLATFORMS 顺序 copy，地板是 `[0]`，
+           而地板又**不许删** ⇒ 它永远是默认层的第一条 ⇒ 判据恒成立。
+        ⛔ 手改 JSON 把顺序调乱的话这条会认错（已记在回执 §未验证）。
+        """
+        return i == len(self.custom_terrains)
+
+    def _edit_write_at(self, i: int, t: dict) -> None:
+        """把改动写回正确的列表。⛔ 写 builtin 段之前调用方必须先 `_edit_takeover()`。"""
+        n = len(self.custom_terrains)
+        if i < n:
+            self.custom_terrains[i] = t
+        else:
+            self.builtin_terrains[i - n] = t
+
+    def _edit_del_at(self, i: int) -> None:
+        """从正确的列表里删掉第 i 项。"""
+        n = len(self.custom_terrains)
+        if i < n:
+            self.custom_terrains.pop(i)
+        else:
+            self.builtin_terrains.pop(i - n)
+
     def _edit_hit(self, wx, wy) -> int:
-        """点选：命中哪一块自定义地形？⇒ 下标，-1 = 没中。
+        """点选：命中哪一块地形？⇒ 下标，-1 = 没中。
+
+        ⭐⭐ PR16 · B 段：从「只遍历 custom_terrains」扩成**统一列表**
+           （自定义层 + 默认 4 条）⇒ 默认平台现在点得中、拖得动、删得掉。
 
         ⭐ 命中判据用**顶面下方即算**（x 在区间内且 y >= y0），
            因为玩家关心的是"我点的是它的顶面还是身子里" —— 都算同一块。
@@ -3234,7 +3635,7 @@ class NightWindow(QWidget):
            高度只有 0 的话，用户瞄准那条线时点上去会"差一点没中"，
            而"差一点没中"在编辑器里体验极差（看起来像坏了）。
         """
-        for i, t in enumerate(self.custom_terrains):
+        for i, t in enumerate(self._edit_all()):
             x0, y0, x1, y1 = plat_fields(t)
             _zero_h = abs(float(y1) - float(y0)) < _THIN_EPS
             _zero_w = abs(float(x1) - float(x0)) < _THIN_EPS
@@ -3251,12 +3652,17 @@ class NightWindow(QWidget):
         #      拿旧的地形删除逻辑去处理会删错东西（或什么都不删）。
         if self.edit_sel_obj and self._edit_del_obj():
             return True
-        if not (0 <= self.edit_sel < len(self.custom_terrains)):
+        # ⭐⭐ PR16 · B 段：从「只删自定义层」扩成**统一列表**（默认平台也能删）
+        if not (0 <= self.edit_sel < len(self._edit_all())):
             return False
+        # ⛔⛔ R3（Ronny 拍板）：**默认地板不可删** —— 删了露娜开局直接掉出世界。
+        if self._is_floor_sel(self.edit_sel):
+            return self._edit_refuse("默认地板不能删（删了露娜会掉出世界）")
         self.edit_snapshot()
-        self.custom_terrains.pop(self.edit_sel)
+        self._edit_takeover()            # ⭐ 删默认平台 ⇒ 必须先接管
+        self._edit_del_at(self.edit_sel)
         self.edit_sel = -1
-        self.room = Room(NIGHTS[self.night_idx], custom=self.custom_terrains,
+        self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
                          overrides=self._collect_overrides())
         self.update()
         return True
@@ -3305,6 +3711,10 @@ class NightWindow(QWidget):
                      else self._nest_draw_y())
             if a - r <= wx <= b + r and abs(wy - yline) <= r:
                 return (nm, -1)
+        # ⭐⭐ PR23 · 关卡边界：**竖直线**，⛔ 判据与上面两个水平线段不同 ——
+        #   它"整高"都可点（没有 y 概念），只要 x 够近就算命中。
+        if self.custom_border is not None and abs(float(self.custom_border) - wx) <= r:
+            return ("border", -1)
         # ---- 第 2 层：食物 / 冰箱食物 ----
         # ⛔ 从后往前（画在上面的先测）
         if self.custom_fridge is not None:
@@ -3359,6 +3769,8 @@ class NightWindow(QWidget):
             # ⭐ 起点对应 `custom_spawn`（字段名去掉了 luna），其余同名
             if kind == "luna_spawn":
                 self.custom_spawn = None
+            elif kind == "border":                    # ⭐⭐ PR23
+                self.custom_border = None
             elif kind == "mw_patrol":
                 self.custom_patrol = None
             else:
@@ -3510,29 +3922,92 @@ class NightWindow(QWidget):
                 if hit is not None:
                     self.edit_sel_obj = hit
                     self.edit_sel = -1
+                    self._move_from = None      # 选中的是「对象」不是地形 ⇒ 不启动地形拖动
+                    self._move_orig = None
+                    self._move_snap = False
                 else:
                     self.edit_sel_obj = None
                     self.edit_sel = self._edit_hit(wx, wy)
+                    # ⭐⭐ PR16 · 选中地形 ⇒ 记住拖动起点，之后 mouseMove 就能整体平移它。
+                    #   ⛔ 只在这里记**起点**，不在这里 edit_snapshot()：
+                    #     「点一下选中但没动」也会 push 撤销栈 ⇒ Ctrl+Z 撤了个寂寞。
+                    # ⭐⭐ PR16 · B 段：默认平台也能选中 ⇒ 用**统一列表**的下标
+                    if 0 <= self.edit_sel < len(self._edit_all()):
+                        self._move_from = (wx, wy)
+                        self._move_orig = dict(self._edit_all()[self.edit_sel])
+                        self._move_snap = False
+                    else:
+                        self._move_from = None
+                        self._move_orig = None
+                        self._move_snap = False
                 self.update()
 
     def mouseMoveEvent(self, ev):
-        if self.mode != "edit" or self._drag is None:
+        if self.mode != "edit":
             return
         wx, wy = self._to_world(float(ev.position().x()), float(ev.position().y()))
+        # ⭐⭐ PR16 · 拖**已有**地形（F9：原来 `_drag is None` 时第一行就 return，
+        #   选中了也拖不动）。
+        #   ⛔ 判定顺序：`_drag` 优先（画新地形），`_move_from` 次之（拖旧的）。
+        #   ⛔ 只在 select 工具下生效 —— 否则在 rect 工具下"点中了旧块想画新的"会变成拖旧的。
+        if self._drag is None:
+            if self.edit_tool == "select" and self._move_from is not None \
+                    and self._move_orig is not None \
+                    and 0 <= self.edit_sel < len(self._edit_all()):
+                dx = wx - self._move_from[0]
+                dy = wy - self._move_from[1]
+                # ⭐⭐ PR20 · B1（Ronny 拍板：地板**可改 y、不可改 x**）：
+                #   `LADDERS=(565,488,FLOOR_Y)` 是独立常量，不随平台走。
+                #   ⛔ 地板一旦被拖到 `x0 > 0`，左边就没地板了 ⇒ 露娜从最左走会掉出世界；
+                #   而且不锁 x 就得手工维护"地板 x 区间 ⊇ 梯子 x"，这正是
+                #   「深夜厨房坐标反复推翻」的同一根因 ⇒ 直接锁死。
+                if self._is_floor_sel(self.edit_sel):
+                    dx = 0.0
+                if not self._move_snap:
+                    # ⭐ 真的动了才进撤销栈（一次拖动一份，不是每帧一份）
+                    #   ⛔ 必须在 `_edit_takeover()` **之前**拍：
+                    #      快照里 builtin_terrains=None ⇒ Ctrl+Z 回到"未接管"= 出厂默认。
+                    self.edit_snapshot()
+                    self._move_snap = True
+                self._edit_takeover()     # ⭐ 拖的是默认平台 ⇒ 先接管，再改
+                o = self._move_orig
+                t = dict(o)
+                # ⭐ 四个坐标**同位移** ⇒ 宽高不变（C4 判据）
+                t["x0"], t["y0"] = o["x0"] + dx, o["y0"] + dy
+                t["x1"], t["y1"] = o["x1"] + dx, o["y1"] + dy
+                self._edit_write_at(self.edit_sel, t)
+                self.update()
+            return
         x0, y0, x1, y1 = self._drag
-        # ⭐ Shift 吸附在**预览阶段**就做，鼠标不动也能看到线已经对齐了
-        if self.edit_tool == "line" and self._drag_shift:
-            if abs(wx - x0) >= abs(wy - y0):
-                x1, y1 = wx, y0
-            else:
-                x1, y1 = x0, wy
+        # ⭐⭐ PR21 · A2：直线工具的**预览必须与落笔结果一致**（所见即所得）。
+        #   ⛔ 改之前只在按 Shift 时才轴对齐预览，不按 Shift 就画斜线预览 ——
+        #      而 A2 之后落笔**永远**是轴对齐的 ⇒ 不改这里就是"预览斜、结果直"。
+        #   ⭐ Shift = 强制另一轴（与 `_edit_add` 同一判据，两边必须同源）。
+        if self.edit_tool == "line":
+            _horiz = (abs(wx - x0) >= abs(wy - y0))
+            if self._drag_shift:
+                _horiz = not _horiz
+            x1, y1 = (wx, y0) if _horiz else (x0, wy)
         else:
             x1, y1 = wx, wy
         self._drag = (x0, y0, x1, y1)
         self.update()
 
     def mouseReleaseEvent(self, ev):
-        if self.mode != "edit" or self._drag is None or ev.button() != Qt.LeftButton:
+        if self.mode != "edit" or ev.button() != Qt.LeftButton:
+            return
+        # ⭐⭐ PR16 · 结束「拖旧地形」：把改完的地形重新灌进 Room。
+        #   ⛔ 拖动过程中**不重建** Room：重建会换掉 platforms 里的 dict 对象，
+        #      而 brittle 状态是用 `id(plat)` 当键存的 ⇒ 每帧重建 = 每帧丢状态。
+        #      编辑器的覆盖层画的是 `custom_terrains`，拖的过程中画面本来就是对的。
+        if self._move_snap:
+            self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
+                             overrides=self._collect_overrides())
+            self.update()
+        self._move_from = None
+        self._move_orig = None
+        self._move_snap = False
+        if self._drag is None:
             return
         x0, y0, x1, y1 = self._drag
         sh = self._drag_shift
@@ -3573,6 +4048,11 @@ class NightWindow(QWidget):
         if k == Qt.Key_Escape:
             self.set_mode("play")
             return True
+        # ⭐⭐ PR16 · 视角跳转（一次性动作 ⇒ 走 _edit_key 吃掉，不进 self.keys）
+        #   ⛔ 键位冲突已核：`1/2/3`（kind）、`4/5/6/7/8/9/0/-`（工具）、
+        #      `S/O/C/Z/Del/Esc/F2/F4/[ ]/, .` 已占用；Home/End/PageUp/PageDown 全空闲。
+        if self._edit_pan_jump(k):
+            return True
         if k == Qt.Key_Z:                          # Ctrl+Z 撤销
             self.edit_undo()
             return True
@@ -3603,7 +4083,11 @@ class NightWindow(QWidget):
         if k == Qt.Key_S:
             try:
                 self.export_terrain()
-                self.msg, self.msg_t = "已导出 %s" % self.terrain_path, 2.5
+                # ⭐⭐ PR26：文案带条数 + 时长 5 秒
+                #   （原来 2.5 秒 + 一整条绝对路径 ⇒ 几百字符顶出屏幕，读不完就消失）
+                _n = len(self._room_custom())
+                self.msg, self.msg_t = (
+                    "✔ 已导出 %d 块地形到 custom_terrain.json" % _n), 5.0
             except OSError as e:
                 self.msg, self.msg_t = "导出失败：%s" % e, 3.0
             return True
@@ -3630,11 +4114,20 @@ class NightWindow(QWidget):
     def start_night(self, idx: int):
         cfg = NIGHTS[idx]
         self.night_idx = idx
-        self.room = Room(cfg)
+        # ⭐⭐⭐ PR17 · 乙（Ronny 2026-10-10 拍板）：**正式开局也吃**自定义地形 + 5 类覆盖。
+        #   ⛔ 改之前这里是 `Room(cfg)`：不吃 `custom`、不吃 `overrides`
+        #      ⇒ 下面那句 `Luna(self.room.spawn_luna...)` 是**死代码**
+        #      （`spawn_luna` 恒等于默认 (80, 599)），
+        #      ⇒ Ronny 在编辑器里设了起点 2000，点「重新开始」就静默弹回 80。
+        #   ⛔ 用的必须是 `_room_custom()`（含已接管的默认平台），
+        #      ⛔ 不是 `custom_terrains`（会漏掉 builtin ⇒ 改过的桌布不生效）。
+        self.room = Room(cfg, custom=self._room_custom(),
+                         overrides=self._collect_overrides())
         # ⭐⭐⭐ PR13：读 room.spawn_luna。⛔ 这一处原来**漏改了**，
         #   它是 start_night() ⇒ 每次开新一局都从这儿构造 Luna
         #   ⇒ 只改 __init__ 的话，Ronny 设了起点 2000、
         #   点「重新开始」就静默弹回80（不报错，只是位置不对）。
+        #   ⭐ PR17：上面补上 overrides 之后，这行才**真的**开始生效。
         self.luna = Luna(self.room.spawn_luna[0], self.room.spawn_luna[1],
                          sneak_ok=self._can_play("sneak"))
         # ⭐ PR-06：把「落地」这个事件接给音频。
@@ -3683,6 +4176,10 @@ class NightWindow(QWidget):
         print(f"[夜间] 开局：{cfg['name']}　赃物 {len(self.room.stashes)} 样"
               f"　边界 x={cfg['border_x']:.0f}　追速 {cfg['chase_speed']:.0f}"
               f"　BGM {'白天 ' + day_bgm if day_bgm else '夜间 bgm_steal'}")
+        # ⭐⭐ PR21 · A1-2：进游戏时提示一次"存档没载入"。
+        #   ⛔⛔ **必须放在最后**（实测踩过）：放前面会被 `self._narrate("enter")`
+        #      立刻覆盖成开场旁白 ⇒ 提示在真实游戏里**根本看不见**。
+        self._warn_save_not_loaded()
 
     def _load_game_frames(self):
         """读 assets_game/ 的帧序列。它们不走 core.load_frames（那里只管桌宠包）。"""
@@ -3945,6 +4442,8 @@ class NightWindow(QWidget):
         #     茶几正后方、下半被布幔挡住，才被迫要求她「站上桌面」。挪开后那个判据
         #     会让她**站在 88px 高的茶几上够一个站在地面的冰箱**，物理上说不通。
         #   判据 = x 在冰箱门区附近（左右各留余量）+ **人在地板层**。
+        if not FRIDGE_ENABLED:
+            return False          # ⭐ 冰箱没了 ⇒ 永远不触发开冰箱 QTE
         return (l.x > FRIDGE["x"] - 104.0 and l.x < FRIDGE["x"] + FRIDGE["w"] + 26.0
                 and abs(l.y - FLOOR_Y) < 6.0)
 
@@ -4173,6 +4672,52 @@ class NightWindow(QWidget):
         elif self.cam_x > CAM_X_MAX:
             self.cam_x = float(CAM_X_MAX)
 
+    # ⭐⭐⭐ PR16 · 编辑态手动平移（⛔ 与 _step_cam 完全独立，互不相干）
+    def _edit_pan_cam(self, dt):
+        """编辑态「按住 A/D 或 ←/→ 挪视野」。
+
+        ⛔⛔ 为什么**不写在 `_edit_key` 里**（派单 §A.3 的重点）：
+            `_edit_key` 返回 True 会在 `self.keys.add(k)` **之前** return
+            （keyPressEvent 里 `:3381-3388` 的注释明写）
+            ⇒ A/D 根本进不了 `self.keys` ⇒ 做不出「按住持续平移」，只能一格一格点。
+            ⇒ 所以 A/D、←/→ **故意不写进 `_edit_key`**，让它们正常进 `self.keys`，
+              由本方法每帧读。
+
+        ⛔ 只 clamp 到 [0, CAM_X_MAX]，与 play 的硬验收线同一区间。
+        ⛔ 必须自己 `self.update()`：edit 分支在 `self.update()`（_tick 末）**之前**
+           就 return 了 ⇒ 不主动请求重绘，画面一帧都不动。
+        """
+        d = 0.0
+        if Qt.Key_A in self.keys or Qt.Key_Left in self.keys:
+            d -= 1.0
+        if Qt.Key_D in self.keys or Qt.Key_Right in self.keys:
+            d += 1.0
+        if d:
+            self.cam_x = max(0.0, min(float(CAM_X_MAX),
+                                      self.cam_x + d * EDIT_CAM_SPEED * dt))
+            self.update()
+
+    def _edit_pan_jump(self, k) -> bool:
+        """PR16 · 跳转键（Home / End / PageUp / PageDown）⇒ 是否吃掉。
+
+        ⭐⭐ 这些**走 `_edit_key`**（return True 吃掉）：它们是一次性动作，
+            不需要「按住持续」，所以不必进 `self.keys`
+            （进去了反而会在 play 里被当移动键残留）。
+        ⛔ 全部 clamp 到 [0, CAM_X_MAX] —— 与 C1 判据同一区间。
+        """
+        if k == Qt.Key_Home:
+            self.cam_x = 0.0
+        elif k == Qt.Key_End:
+            self.cam_x = float(CAM_X_MAX)
+        elif k == Qt.Key_PageUp:
+            self.cam_x = max(0.0, self.cam_x - float(VW))
+        elif k == Qt.Key_PageDown:
+            self.cam_x = min(float(CAM_X_MAX), self.cam_x + float(VW))
+        else:
+            return False
+        self.update()
+        return True
+
     def _tick(self):
         import time
         now = time.perf_counter()
@@ -4186,6 +4731,11 @@ class NightWindow(QWidget):
         if self.mode == "edit":
             if self.msg_t > 0:
                 self.msg_t -= dt
+            # ⭐⭐ PR16 · 编辑态手动平移镜头。
+            #   ⛔ 必须放在这里：`_tick` 的 play 路径才调 `_step_cam`，
+            #      而 edit 在上面就 return 了 ⇒ 不在这儿调，编辑态 cam_x 永远冻结
+            #      （实测根因 F1/F2）。
+            self._edit_pan_cam(dt)
             return
 
         l, mw = self.luna, self.mw
@@ -4391,6 +4941,39 @@ class NightWindow(QWidget):
         # ⭐⭐ 2026-10-05 PR-03：菜单态**不跟随**（她固定在窝里等着，镜头没意义）。
         #   ⛔ 菜单不跟 = 玩家看不到"地图有多大"，但菜单本来就是选档界面。
         if self.phase == "menu":
+            # ⭐⭐⭐ PR19 · 编辑态走**美术底图**（与游戏态同源）⇒ 所见即所得。
+            #   ⛔ 改之前这里画的是 `_draw_bg` —— 那是**程序画的渐变 + 一只写死的假窗户**，
+            #      而游戏态画的是 `_draw_bg_slices`（3 张美术切片）⇒ **两套完全不同的底图**
+            #      ⇒ 在编辑器里对的位置，进了游戏必然偏。
+            #   ⛔ 下面这串调用的**顺序与 translate 方式必须与游戏态逐字一致**
+            #      （都是 `translate(-cam_x)` 包住整条链）⇒ 否则二次偏移，历史踩过。
+            #   ⛔ `_draw_bg` 一个字都没改（menu 选关界面靠它做氛围）。
+            #   ⛔⛔ **刻意不画 `_draw_platforms`**（派单 §3）：它在游戏态会按
+            #      `which_part()` 程序贴家具图，而美术底图里家具已经画好了 ⇒ 游戏态有重影。
+            #      编辑态不贴 ⇒ Ronny 看到的是干净的美术底图（见回执 §4 的实测与提醒）。
+            if self.mode == "edit":
+                p.save()
+                p.translate(-self.cam_x, 0.0)
+                self._draw_zone(p)
+                self._draw_bg_slices(p)
+                if self.bg_img is not None:
+                    self._draw_nest(p)
+                    self._draw_stashes(p)
+                    self._draw_fridge(p)
+                    # ⭐ PR19 §2：编辑态**必须**看得见微波炉 —— Ronny 要设巡逻段，
+                    #   看不见它就画不准。编辑态 `_tick` 早退 ⇒ 它不会动，正好当参照物。
+                    # ⭐⭐ PR20 · A2：画在**巡逻段中点**（没设巡逻段才退回 `self.mw.x`）
+                    _pat = self._collect_overrides().get("mw_patrol")
+                    self._draw_mw(p, x_override=((_pat[0] + _pat[1]) / 2.0)
+                                  if _pat else None)
+                    self._draw_fx_behind(p)
+                    self._draw_luna(p)
+                    self._draw_fx_front(p)
+                self._draw_edit_overlay(p)
+                p.restore()
+                self._draw_edit_toolbar(p)
+                p.end()
+                return
             self._draw_bg(p)
             self._draw_nest(p)
             self._draw_fx_behind(p)
@@ -4460,25 +5043,39 @@ class NightWindow(QWidget):
     _EDIT_KIND_CN = {"solid": "永久", "brittle": "短暂消失", "climb": "攀爬"}
 
     def _draw_edit_overlay(self, p):
-        """画自定义地形 + 拖拽预览（已在translate(-cam_x) 的坐标系里）。"""
-        # ---- 默认 4 平台：半透明「只读」参照（Q5 未拍板 ⇒ 先只显示，不可编辑）----
-        for t in self.room.platforms[:len(PLATFORMS)]:
-            x0, y0, x1, y1 = plat_fields(t)
-            p.setPen(QPen(QColor(120, 130, 150, 110), 1, Qt.DotLine))
-            p.setBrush(Qt.NoBrush)
-            p.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
-        # ---- 自定义层 ----
-        for i, t in enumerate(self.custom_terrains):
+        """画全部可编辑地形 + 拖拽预览（已在translate(-cam_x) 的坐标系里）。
+
+        ⭐⭐ PR16 · B 段（Ronny 拍板「方案 1」）：默认 4 平台**接管后**也画成
+           可编辑的彩色块（带「默认」标签）；**未接管**时仍是 PR12 的只读虚线参照。
+        """
+        _n_c = len(self.custom_terrains)
+        _bl = self.builtin_terrains
+        # ---- 统一遍历 `_edit_all()`（自定义在前、默认 4 条在后）----
+        #   ⛔⛔ 两处坑（都是我实测读出来的，派单没列）：
+        #     ① PR16 方案 1 全集模式下 `Room.platforms` 只剩 custom ⇒ 原来那句
+        #        `platforms[:len(PLATFORMS)]` 会把 custom 前 4 条**再画一层只读虚线框**
+        #        ⇒ 重影。所以只读参照层**不再单独画**，统一在这里按条目画。
+        #     ② PR17 · P2-2：未接管时原来只遍历 `custom_terrains`
+        #        ⇒ 选中默认平台**画面完全没高亮**（能删能拖，但看不出选中了）。
+        #        ⇒ 现在一律遍历统一列表，未接管的默认条用**灰蓝虚线**表示"只读参照"，
+        #          但选中时**照样加粗高亮**。
+        for i, t in enumerate(self._edit_all()):
+            _pending = (_bl is None and i >= _n_c)   # 未接管的默认平台
             x0, y0, x1, y1 = plat_fields(t)
             c = self._EDIT_COLOR.get(plat_kind(t), (200, 200, 200))
+            if _pending:
+                c = (128, 138, 158)                  # 灰蓝 = 只读参照（PR12 的观感）
             sel = (i == self.edit_sel)
             # ⭐ brittle 正在消失 ⇒ 画成半透明（游戏里也一样，这里是编辑期预览）
             alive = True
             if plat_kind(t) == "brittle":
                 # ⛔ 编辑态下 room 可能是旧实例（没重建），查不到就当活着
+                # ⭐ PR16 · B 段：全集模式下 platforms 里**没有**默认 4 条前缀，
+                #   偏移量要跟着变（否则查到的是错的那块地）
+                _off = len(_bl) if _bl is not None else len(PLATFORMS)
                 try:
-                    alive = self.room.brittle_active(id(self.room.platforms[
-                        len(PLATFORMS) + i]))
+                    alive = self.room.brittle_active(
+                        id(self.room.platforms[_off + (i - _n_c)]))
                 except (AttributeError, IndexError):
                     alive = True
             a = 200 if alive else 70
@@ -4487,13 +5084,23 @@ class NightWindow(QWidget):
             #   会以为工具坏了。零厚画成 3px 宽的实心条。
             _th = max(3.0, float(y1) - float(y0))
             _ty = y0 if abs(float(y1) - float(y0)) >= _THIN_EPS else (y0 - _th / 2.0)
-            p.setPen(QPen(QColor(c[0], c[1], c[2], a), 3 if sel else 2))
-            p.setBrush(QColor(c[0], c[1], c[2], 70 if alive else 24))
+            # ⭐ PR17 · P2-2：未接管的默认条画**虚线**（= 只读参照的观感），
+            #   但**选中时照样加粗到 3px** ⇒ Ronny 点它时看得见自己选中了。
+            p.setPen(QPen(QColor(c[0], c[1], c[2], 150 if _pending else a),
+                          3 if sel else (1 if _pending else 2),
+                          Qt.DotLine if _pending else Qt.SolidLine))
+            p.setBrush(Qt.NoBrush if _pending
+                       else QColor(c[0], c[1], c[2], 70 if alive else 24))
             p.drawRect(QRectF(x0, _ty, max(3.0, float(x1) - float(x0)), _th))
             # ⭐ 名字标在块内（左上），删了名字就不知道选中的是哪块
             p.setPen(QColor(c[0], c[1], c[2], a))
             p.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-            p.drawText(QPointF(x0 + 4, y0 + 14), self._EDIT_KIND_CN.get(plat_kind(t), "?"))
+            _cn = self._EDIT_KIND_CN.get(plat_kind(t), "?")
+            # ⭐ PR16 · B 段：默认平台标「默认」⇒ Ronny 一眼分清哪条是 PLATFORMS 里的
+            # ⭐ PR17：未接管的加「未接管」⇒ 他知道自己一动就会把它固化进存档
+            if i >= _n_c:
+                _cn = ("默认(未接管) " if _pending else "默认 ") + _cn
+            p.drawText(QPointF(x0 + 4, y0 + 14), _cn)
         # ---- 拖拽中的预览 ----
         if self._drag is not None:
             x0, y0, x1, y1 = self._drag
@@ -4605,6 +5212,40 @@ class NightWindow(QWidget):
                 p.setBrush(QColor(col[0], col[1], col[2], 120))
                 p.drawRect(QRectF(mid - 7, yline - 40, 14, 14))
 
+        # ⭐⭐ PR23 · 关卡边界：一条**竖直虚线**（整高）。
+        #   ⛔ 未设时也画一条淡的"关卡默认" ⇒ Ronny 能看见边界本来在哪，
+        #      才知道自己把它拖到了哪（不然会以为"边界没生效"）。
+        _bx = (self.room.border_x if self.custom_border is None
+               else float(self.custom_border))
+        _bsel = (self.edit_sel_obj == ("border", -1))
+        _bset = (self.custom_border is not None)
+        # ⭐⭐ PR28（Ronny：「安全区域不太会用」）：**禁区染色**。
+        #   ⛔ 为什么必须画：边界线只说明"在这儿"，却没说"哪边是禁区"，
+        #   而 `border_x` 的真实语义是**微波炉的行为开关**（越界才追她），
+        #   ⛔ 不是一堵墙 ⇒ Ronny 看不出染色就会以为"边界和地形一样能撞"。
+        #   ⇒ 禁区盖一层**半透明红**，安全区盖一层**半透明青**，一眼分清。
+        #   ⚠️ 必须在 translate(-cam_x) 之内（此处已在）⇒ 与地形同一坐标系。
+        _vis_x0 = float(self.cam_x) - 4.0
+        _vis_x1 = float(self.cam_x) + float(VW) + 4.0
+        _safe_w = max(0.0, min(_bx, _vis_x1) - _vis_x0)
+        if _safe_w > 0.0:
+            p.fillRect(QRectF(_vis_x0, 0.0, _safe_w, float(VH)),
+                       QColor(40, 150, 190, 26))      # 安全区（可安心行动）
+        _risk_x0 = max(_bx, _vis_x0)
+        _risk_w = _vis_x1 - _risk_x0
+        if _risk_w > 0.0:
+            p.fillRect(QRectF(_risk_x0, 0.0, _risk_w, float(VH)),
+                       QColor(220, 60, 50, 34))        # 禁区（微波炉会追）
+        _bcol = (255, 170, 120) if _bset else (140, 150, 170)
+        p.setPen(QPen(QColor(_bcol[0], _bcol[1], _bcol[2],
+                                255 if _bsel else (170 if _bset else 90)),
+                      3 if _bsel else 2, Qt.DashLine))
+        p.drawLine(QPointF(_bx, 0.0), QPointF(_bx, float(VH)))
+        p.setPen(QColor(_bcol[0], _bcol[1], _bcol[2], 255))
+        p.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        p.drawText(QPointF(_bx + 6, 18),
+                   ("边界 %d" % int(_bx)) if _bset else "边界默认 %d" % int(_bx))
+
     def _draw_edit_spawn(self, p):
         """露娜起点：三角旗 + `L`（派单 §2.4）。⛔ None 时不画。
 
@@ -4631,6 +5272,26 @@ class NightWindow(QWidget):
 
     def _draw_edit_toolbar(self, p):
         """编辑器工具栏（画在视口坐标，**不跟随镜头**）。"""
+        # ⭐⭐ PR26（2026-10-10）：编辑态**从来没有**画过 self.msg。
+        #   实测根因：`_tick` 的 edit 早退分支只让 msg_t 递减（`:4704`），
+        #   ⛔ 全文件没有任何地方在编辑态把 msg 画出来
+        #   ⇒ Ronny 按 S 导出成功（文件确实写了 18 块），但**屏幕上一点反应都没有**，
+        #      看起来像"导出坏了"。提示连同内容一起被丢掉了。
+        if self.msg_t > 0 and self.msg:
+            _a = int(205 * min(1.0, max(0.0, self.msg_t)))
+            _bad = self.msg.startswith("⚠") or self.msg.startswith("导出失败")
+            p.setPen(Qt.NoPen)
+            # ⛔ 别写 QColor((a,b,c,d) if cond else (e,f,g,d)) ——
+            #   PySide6 报 "QVariant must be holding a QColor"（三元表达式先算出元组再进构造）。
+            #   ✅ 必须两条显式分支。
+            if _bad:
+                p.setBrush(QColor(150, 40, 40, _a))
+            else:
+                p.setBrush(QColor(24, 110, 70, _a))
+            p.drawRect(QRectF(0, 46, VW, 30))
+            p.setPen(QColor(255, 255, 255, min(255, _a + 40)))
+            p.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+            p.drawText(QPointF(12, 66), self.msg)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(14, 16, 24, 205))
         p.drawRect(QRectF(0, 0, VW, 46))
@@ -4673,15 +5334,22 @@ class NightWindow(QWidget):
         p.setPen(QColor(150, 156, 172))
         p.setFont(QFont("Microsoft YaHei", 9))
         p.drawText(QPointF(14, 40),
-                   "Shift 直线锁水平/垂直   [ ]换 icon   , . 换 kind   "
+                   "直线工具 = 零厚线（可站/可爬，Shift 强制另一轴）   "
+                   "要斜的薄板请用矩形工具   "
+                   "Shift+直线 强制另一轴   [ ]换 icon   , . 换 kind   "
                    "Delete 删除选中（起点/巡逻/窝 = 恢复默认）   Ctrl+Z 撤销   "
-                   "C 清空全部   S 导出   O 导入   F4 试跑   F2 返回")
+                   "C 清空全部   S 导出   O 导入   F4 试跑   F2 返回   "
+                   "A/D 或 ←/→ 平移视角   Home/End 跳两端   PageUp/Dn 跳一屏")
         # ⭐ 巡逻段不拦"进冰箱体"（§2.3）：只提示，这是关卡设计约束，
         #   编辑器不该替Ronny 决定。
         p.setPen(QColor(210, 170, 120))
         p.drawText(QPointF(14, VH - 30),
                    "⚠ 微波炉 `self.y = FLOOR_Y` 是硬编码，他永远在地板上；"
-                   "巡逻段拖进冰箱范围不会被拦（那是关卡约束，不是编辑器的事）")
+                   "巡逻段拖进冰箱范围不会被拦（那是关卡约束，不是编辑器的事）"
+                   # ⭐⭐ PR20 · B4：贴图归属只吃 **y0（顶面）**，不吃 y1
+                   #   （实测 `which_part`）⇒ 只改高度不影响；
+                   #   ⛔ 但把平台挪到**别的高度区间**就可能贴错图 —— 必须让他知道。
+                   "　｜　贴图按平台顶面判归属，只改高度不影响；挪到别的高度区间可能贴错图")
         # ---- 底部：数量 + 直线工具的留白说明（Q3 未拍板，必须让人看见）----
         p.setPen(QColor(200, 200, 210))
         p.setFont(QFont("Microsoft YaHei", 10))
@@ -4689,13 +5357,29 @@ class NightWindow(QWidget):
         #   否则"我放了 3 个食物，界面只说地形 0 块"会让人以为没放成功。
         p.drawText(QPointF(14, VH - 14),
                    "自定义地形 %d 块 ｜ 食物 %d ｜ 冰箱食物 %d ｜ 起点 %s ｜ 巡逻段 %s ｜ 窝区 %s ｜ "
+                   # ⭐⭐ PR23：把「关卡边界」也列进计数行 —— 未设时显示关卡默认值
+                   "边界 %s ｜ "
                    "拖左键画 / 选中 ｜ 双击删除"
+                   " ｜ 默认平台 %s"
+                   " ｜ 视角 %d / %d（可见 %d~%d）"
+                   # ⭐⭐ PR21 · A1：把存档加载状态画在工具栏上 ——
+                   #   「未接管」状态下画面和「已载入」几乎一样，Ronny 分不出来。
+                   " ｜ %s"
                    % (len(self.custom_terrains),
                       len(self.custom_stashes or []),
                       len(self.custom_fridge or []),
                       "已设" if self.custom_spawn else "默认",
                       "%d~%d" % self.custom_patrol if self.custom_patrol else "默认",
-                      "%d~%d" % self.custom_nest if self.custom_nest else "默认"))
+                      "%d~%d" % self.custom_nest if self.custom_nest else "默认",
+                      # ⭐⭐ PR23 · None = 不覆盖 ⇒ 显示关卡默认
+                      ("%d" % int(self.custom_border)) if self.custom_border
+                      is not None else ("默认%d" % int(self.room.border_x)),
+                      # ⭐ PR16 · B 段：默认平台是否被接管（接管了 ⇒ 导出会升 v3）
+                      ("已改 %d 条" % len(self.builtin_terrains)
+                       if self.builtin_terrains else "默认"),
+                      int(self.cam_x), int(CAM_X_MAX),
+                      int(self.cam_x), int(self.cam_x) + VW,
+                      self._save_status_cn()))
         # ---- 二次确认提示 ----
         if self._confirm_clear:
             p.setPen(QColor(255, 120, 100))
@@ -5083,6 +5767,8 @@ class NightWindow(QWidget):
         ✅ 替代反馈：**门缝透光 + 冰箱区域提亮**（见下面 bg 分支）。
         无背景板时（灰盒回退）仍走完整程序绘制。
         """
+        if not FRIDGE_ENABLED:
+            return                 # ⭐ 冰箱没了 ⇒ 什么都不画
         fr = FRIDGE
         x, y0 = fr["x"], fr["y"] - fr["h"]
         w, h = fr["w"], fr["h"]
@@ -5327,9 +6013,14 @@ class NightWindow(QWidget):
                                        fx[1] - 20 + math.sin(ang) * rad * 0.6),
                                  4.5 * (1 - t) + 1, 4.5 * (1 - t) + 1)
 
-    def _draw_mw(self, p):
+    def _draw_mw(self, p, x_override=None):
         m = self.mw
-        x, y = m.x, m.y
+        # ⭐⭐ PR20 · A2：编辑态要画**巡逻段中点**，而不是 `self.mw.x`（初始位置）
+        #   —— 否则 Ronny 设完巡逻段，编辑态的微波炉不动 ⇒ 拿它对坐标反而误导。
+        #   ⛔⛔ 用**参数**传，⛔ 不改 `self.mw.x` 再还原（那路容易漏、且会污染游戏状态）。
+        #   ⛔ 只改这一处就够：下面视野锥 / 本体 / `_draw_mw_box` 全用这个局部 `x`。
+        x = m.x if x_override is None else float(x_override)
+        y = m.y
         # 视野（只在追击时才明显，巡逻时很淡）
         a = int(40 + 70 * m.alert)
         vg = QLinearGradient(x, y - 40, x + m.face * m.sight, y - 40)

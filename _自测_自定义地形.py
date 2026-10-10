@@ -89,11 +89,14 @@ section("① 默认地形与改动前逐字一致（4 个平台的坐标 + 类�
 # ⭐ 基线 = PR12 之前 night.py 里的 PLATFORMS 字面值（night.py:187-191）。
 #   ⛔ 这里写死数字是**刻意的** —— 若我改成从别处推导，
 #   「与改动前一致」这条判据就变成自证，永远绿。
+# ⭐⭐ 2026-10-10 Ronny 授权：地板下移到画布底往上 50px（FLOOR_Y=670）
+#   ⇒ 这两条判据里的 599 必须跟 FLOOR_Y 走，⛔ 不许再写死。
+#   理由：写死 = 地板一改就假红，而假红会掩盖真正的回归（今天已吃过一次）。
 _BASE_PLATFORMS = [
-    (0,599, 3840, 720),          # 地板
-    (430, 488, 700, 599),# 餐桌
-    (760, 380, 1060, 418),       # 厨房台（薄台面）
-    (790, 50, 1010, 189),        # 吊柜
+    (0, N.FLOOR_Y, 3840, 720),    # 地板（y0 跟 FLOOR_Y）
+    (430, 488, 700, N.FLOOR_Y),    # 餐桌（y1 垂到地，跟 FLOOR_Y）
+    (760, 380, 1060, 418),        # 厨房台（薄台面，不落地）
+    (790, 50, 1010, 189),         # 吊柜
 ]
 got = [tuple(int(round(v)) for v in N.plat_fields(p)) for p in N.platform_dicts(N.PLATFORMS)]
 chk("①-1 默认 4 平台坐标逐字未变", got == _BASE_PLATFORMS,
@@ -141,9 +144,11 @@ data = N.terrain_to_json(custom)
 chk("③-1 导出结构 = {version,world_w, floor_y, terrains}",
     sorted(data.keys()) == ["floor_y", "terrains", "version", "world_w"],
     "实测 %s" % sorted(data.keys()))
-chk("③-2 version=1 / world_w=3840 / floor_y=599",
-    data["version"] == 1 and data["world_w"] == 3840 and data["floor_y"] == 599,
-    "实测 v=%s w=%s f=%s" % (data["version"], data["world_w"], data["floor_y"]))
+chk("③-2 version=1 / world_w=3840 / floor_y 跟 FLOOR_Y",
+    data["version"] == 1 and data["world_w"] == 3840
+    and data["floor_y"] == int(N.FLOOR_Y),
+    "实测 v=%s w=%s f=%s（期望 f=%d）"
+    % (data["version"], data["world_w"], data["floor_y"], int(N.FLOOR_Y)))
 chk("③-3 terrains 每项恰好 5 个键（kind/x0/y0/x1/y1）",
     all(sorted(t.keys()) == ["kind", "x0", "x1", "y0", "y1"] for t in data["terrains"]),
     "实测 %s" % [sorted(t.keys()) for t in data["terrains"]])
@@ -602,9 +607,28 @@ chk("⑨-15 play_custom 下自定义地形进了 room",
     len(w.room.platforms) == 5 and any(
         N.plat_kind(p) == "climb" for p in w.room.platforms),
     "platforms=%d" % len(w.room.platforms))
+# ⭐⭐⭐ PR18（设计端 2026-10-10 签字）：⑨-16 的语义从「F2 = 回**默认**关卡」
+#   改成「F2 = 回**游戏**，**吃**自定义地形」—— 与 `start_night` / `play_custom`
+#   三条进游戏路径口径一致。改前 F2 一按，露娜眼前的地形当场消失。
+#   ⛔ 期望值**不能写死 4**，也不能直接写 `len(w._room_custom())`：
+#      实测（PR18 执行端）后者在**未接管**时只返回自定义层（1 条），
+#      而 `Room.platforms` 走的是「默认 4 + 自定义 N」= 5 ⇒ 拿 1 去比 5 会假红。
+#      ⇒ 口径必须分两态：
+#         未接管 ⇒ len(PLATFORMS) + len(自定义)
+#         已接管 ⇒ len(_room_custom())（全集模式，platforms 只剩 custom+builtin）
+_n_play = (len(w._room_custom()) if w.builtin_terrains is not None
+           else len(N.PLATFORMS) + len(w._room_custom()))
 w.set_mode("play")
-chk("⑨-16 回 play 后自定义地形**不**进 room（默认行为不变）",
-    len(w.room.platforms) == 4, "platforms=%d" % len(w.room.platforms))
+chk("⑨-16 回 play 后自定义地形**进** room（PR18：三路同口径）",
+    len(w.room.platforms) == _n_play,
+    "platforms=%d 期望=%d（builtin_terrains=%s）"
+    % (len(w.room.platforms), _n_play,
+       "None" if w.builtin_terrains is None else len(w.builtin_terrains)))
+# ⭐⭐ 阳性对照（设计端 §2.1 明确要求）：**不传 custom** 的裸 Room 仍然是 4 条
+#   ⇒ 证明上面那个数字是 custom 带来的，不是 Room 自己变了。
+chk("⑨-16b ⭐⭐ 阳性对照：`Room(NIGHTS[0])` 不传 custom ⇒ 仍 4 条",
+    len(N.Room(N.NIGHTS[0]).platforms) == 4,
+    "实测 %d 条" % len(N.Room(N.NIGHTS[0]).platforms))
 chk("⑨-17 自定义数据仍留着（切模式不清空编辑成果）",
     len(w.custom_terrains) == 1, "n=%d" % len(w.custom_terrains))
 
@@ -659,7 +683,8 @@ w2.start_night(0)
 w2.set_mode("edit")
 w2.custom_terrains = []
 # ---- 水平线（dx > dy ⇒ 锁水平，y 相同）----
-ok_h = w2._edit_add(500.0, 400.0, 700.0, 410.0, "solid", line=True, shift=True)
+# ⭐⭐ PR24 §4（设计端签字）：直线工具**默认零厚**，shift 不再是前提 ⇒ 去掉。
+ok_h = w2._edit_add(500.0, 400.0, 700.0, 410.0, "solid", line=True)
 t = w2.custom_terrains[-1]
 chk("⑫-1 Shift+宽横线 ⇒ 水平零厚（y0 == y1）",
     ok_h and t["y0"] == t["y1"], "实测 y0=%.1f y1=%.1f" % (t["y0"], t["y1"]))
@@ -667,7 +692,7 @@ chk("⑫-2 水平线 x 跨度 = 拖出来的宽度", abs(t["x1"] - t["x0"] - 200
     "实测 %.1f" % (t["x1"] - t["x0"]))
 # ---- 垂直线（dy > dx ⇒ 锁垂直，x 相同）----
 w2.custom_terrains = []
-ok_v = w2._edit_add(1500.0, 300.0, 1510.0, 599.0, "climb", line=True, shift=True)
+ok_v = w2._edit_add(1500.0, 300.0, 1510.0, 599.0, "climb", line=True)
 t = w2.custom_terrains[-1]
 chk("⑫-3 Shift+竖直线 ⇒ 垂直零厚（x0 == x1）",
     ok_v and t["x0"] == t["x1"], "实测 x0=%.1f x1=%.1f" % (t["x0"], t["x1"]))
@@ -678,19 +703,24 @@ chk("⑫-4 垂直线 y 跨度 = 拖出来的高度", abs(t["y1"] - t["y0"] - 299
 #    ⑫-3 已经把表换成垂直线了，⑫-5 却去点水平线的位置 ⇒ 必然 -1。
 #    （这是判据自身的顺序 bug，不是代码 bug。）
 w2.custom_terrains = []
-w2._edit_add(500.0, 400.0, 700.0, 410.0, "solid", line=True, shift=True)
+w2._edit_add(500.0, 400.0, 700.0, 410.0, "solid", line=True)
 chk("⑫-5 水平线也能选（两种朝向都可选）", w2._edit_hit(600.0, 400.0) >= 0,
     "当前地形 %s 命中 %d" % (w2.custom_terrains[-1], w2._edit_hit(600.0, 400.0)))
 w2.custom_terrains = []
-w2._edit_add(1500.0, 300.0, 1510.0, 599.0, "climb", line=True, shift=True)
+w2._edit_add(1500.0, 300.0, 1510.0, 599.0, "climb", line=True)
 chk("⑫-6 垂直线也能选", w2._edit_hit(1500.0, 450.0) >= 0,
     "当前地形 %s 命中 %d" % (w2.custom_terrains[-1], w2._edit_hit(1500.0, 450.0)))
-# ---- 不按 Shift ⇒ 自由（仍有厚度，不锁轴）----
+# ---- ⭐⭐ PR24 §4（设计端签字）：语义反转 —— 直线工具**默认零厚** ----
 w2.custom_terrains = []
 w2._edit_add(500.0, 400.0, 700.0, 450.0, "solid", line=True, shift=False)
 t = w2.custom_terrains[-1]
-chk("⑫-7 不按 Shift ⇒ 自由（有厚度，未锁轴）",
-    t["y1"] - t["y0"] > 0.0, "实测厚度 %.1f" % (t["y1"] - t["y0"]))
+chk("⑫-7 不按 Shift ⇒ **零厚**（直线工具默认画线，不再出矩形）",
+    t["y1"] == t["y0"] or t["x0"] == t["x1"],
+    "实测 (%s,%s)-(%s,%s)" % (t["x0"], t["y0"], t["x1"], t["y1"]))
+# ⭐⭐ 派单 §4 额外要求：零厚但**非零长** —— 钉「双重翻转 ⇒ 零长 ⇒ 什么都没画」那个 bug
+chk("⑫-7b ⭐⭐ 阳性对照：零厚但**长度 > 0**（⛔ 长度为 0 就是被丢掉的那条）",
+    max(t["x1"] - t["x0"], t["y1"] - t["y0"]) > 0.0,
+    "主轴长度 %.1f" % max(t["x1"] - t["x0"], t["y1"] - t["y0"]))
 # ---- 导出时 y1 不许省（schema 统一）----
 dd = N.terrain_to_json([{"kind": "solid", "x0": 500.0, "y0": 400.0,
                         "x1": 700.0, "y1": 400.0}])
@@ -835,8 +865,10 @@ a1 = (800.0 * w3.k, 430.0 * w3.k)      # 故意 y 也变了，Shift 应把它压
 w3.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton, a0, Qt.ShiftModifier))
 w3.mouseMoveEvent(_mouse(QEvent.MouseMove, Qt.NoButton, a1, Qt.ShiftModifier))
 w3.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton, a1, Qt.ShiftModifier))
-ok_h2 = len(w3.custom_terrains) == 1 and w3.custom_terrains[-1]["y0"] == w3.custom_terrains[-1]["y1"]
-chk("⑭-8 ⭐ 直线+Shift：真实鼠标画出**水平**零厚线", ok_h2,
+# ⭐⭐ PR24 §4（设计端签字）：Shift 新语义 = **强制另一轴**
+#   ⇒ 这条拖的是"宽横线"(dx200>dy50)，按 Shift ⇒ 判成**垂直**。
+ok_h2 = len(w3.custom_terrains) == 1 and w3.custom_terrains[-1]["x0"] == w3.custom_terrains[-1]["x1"]
+chk("⑭-8 ⭐ 直线+Shift：宽横线 + 强制另一轴 ⇒ **垂直**零厚线", ok_h2,
     "实测 %s" % (w3.custom_terrains[-1] if w3.custom_terrains else "（没画出来）"))
 # ③ 直线（垂直）：Shift 且 dy > dx
 w3.custom_terrains = []
@@ -845,8 +877,8 @@ b1 = (1215.0 * w3.k, 560.0 * w3.k)     # dx 小 dy 大⇒ 应锁垂直
 w3.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton, b0, Qt.ShiftModifier))
 w3.mouseMoveEvent(_mouse(QEvent.MouseMove, Qt.NoButton, b1, Qt.ShiftModifier))
 w3.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton, b1, Qt.ShiftModifier))
-ok_v2 = len(w3.custom_terrains) == 1 and w3.custom_terrains[-1]["x0"] == w3.custom_terrains[-1]["x1"]
-chk("⑭-9 ⭐ 直线+Shift：真实鼠标画出**垂直**零厚线", ok_v2,
+ok_v2 = len(w3.custom_terrains) == 1 and w3.custom_terrains[-1]["y0"] == w3.custom_terrains[-1]["y1"]
+chk("⑭-9 ⭐ 直线+Shift：竖直线 + 强制另一轴 ⇒ **水平**零厚线", ok_v2,
     "实测 %s" % (w3.custom_terrains[-1] if w3.custom_terrains else "（没画出来）"))
 # ④ 不按 Shift ⇒ 自由（有厚度，dy 大也不锁轴）
 w3.custom_terrains = []
@@ -970,10 +1002,21 @@ w4.mousePressEvent(_mouse(QEvent.MouseButtonPress, Qt.LeftButton,
                           (_gx * w4.k, _gy * w4.k)))
 w4.mouseReleaseEvent(_mouse(QEvent.MouseButtonRelease, Qt.LeftButton,
                              (_gx * w4.k, _gy * w4.k)))
-_ok3 = (w4.custom_fridge is not None and len(w4.custom_fridge) == 1
-        and w4.room.fridge_left[-1]["x"] == _gx)
-chk("⑮-3 ⭐ 放一个 fridge food ⇒ room.fridge_left 多一条", _ok3,
-    "fridge_left 末条 %s" % (w4.room.fridge_left[-1] if w4.room.fridge_left else "—"))
+if N.FRIDGE_ENABLED:
+    _ok3 = (w4.custom_fridge is not None and len(w4.custom_fridge) == 1
+            and w4.room.fridge_left[-1]["x"] == _gx)
+    chk("⑮-3 ⭐ 放一个 fridge food ⇒ room.fridge_left 多一条", _ok3,
+        "fridge_left 末条 %s" % (w4.room.fridge_left[-1] if w4.room.fridge_left else "—"))
+else:
+    # ⭐⭐ 2026-10-10 Ronny 拍板冰箱删除（FRIDGE_ENABLED=False）。
+    #   原来这条判据会**假红**：它断言"放冰箱食物能成功"，而冰箱已经不存在了。
+    #   ⛔ 正确做法不是删掉这条（删了就没人管这条路径了），而是**改判它该判的东西**：
+    #      没有冰箱 ⇒ 必须**明确拒绝**，⛔ 不能静默接受（静默 = 用户以为放上了）。
+    chk("⑮-3 ⭐ FRIDGE_ENABLED=False ⇒ 放冰箱食物被**明确拒绝**（不是静默接受）",
+        (w4.custom_fridge is None or len(w4.custom_fridge) == 0)
+        and len(w4.room.fridge_left) == 0,
+        "custom_fridge=%s fridge_left=%d 条"
+        % (w4.custom_fridge, len(w4.room.fridge_left)))
 
 # ---- 判据 4：设露娜起点 x=2000，**且 :1621 兜底路径也走这个点** ----
 # ⭐⭐ 后半段是这条判据的重点：只测 room.spawn_luna 等于没测——

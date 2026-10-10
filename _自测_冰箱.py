@@ -10,6 +10,22 @@
 import os
 import sys
 
+# ⭐⭐⭐ 2026-10-10 Ronny 拍板：**冰箱也不要了**（FRIDGE_ENABLED=False）。
+#   本文件**整份**都是冰箱专测（墙 / 顶落点 / 前站位）⇒ 冰箱不存在时全部无意义。
+#   ⛔ 为什么不删文件：将来把冰箱加回来（把 FRIDGE_ENABLED 翻回 True），
+#      这些判据就是现成的回归网，删了等于白写。
+#   ⛔ 为什么不静默退出：静默退出 = 聚合脚本看到"没有失败字样"会**误判为通过**，
+#      等于把 4 条判据从"红"变成"假绿"。
+from pet_engine import night as _N
+if not _N.FRIDGE_ENABLED:
+    print("=" * 78)
+    print("_自测_冰箱.py —— 已跳过：FRIDGE_ENABLED=False（2026-10-10 Ronny 拍板冰箱删除）")
+    print("本文件整份是冰箱专测，冰箱不存在时无意义。")
+    print("把 night.py 的 FRIDGE_ENABLED 翻回 True 可重新启用本文件的 4 条判据。")
+    print("=" * 78)
+    print("通过 0 / 0 （跳过，非通过）")
+    sys.exit(0)
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
