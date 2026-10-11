@@ -5,6 +5,9 @@
     桌宠之外单独开的一个小游戏窗口：深夜厨房，操控露娜越过允许区边界去偷东西，
     别被微波炉抓到。被抓 → 黑魂风 "YOU MEOWED" → 押送回窝，这趟赃物清零。
 
+    ⏳ 2026-10-10 起游戏设定改为「白天正午档」，⛔ 但**模块名与代号保留**
+       （改名要动文件名 + 所有 import + 启动 bat，收益为零）。玩家可见文案已全部白天化。
+
 ⛔ 与桌宠的边界
     本模块【不 import 也不调用】core.Pet / ui.PetWindow。
     桌宠的物理是"屏幕坐标 + 地形驱动 + 情绪状态机"，跟横板关卡需要的
@@ -122,7 +125,7 @@ def _level_bgm_name(cfg: dict):
 
 
 # ============================================================================
-# ① 关卡数据 —— 深夜厨房（灰盒，改这里就能改关卡）
+# ① 关卡数据 —— 深夜厨房（代号，不随设定改）（灰盒，改这里就能改关卡）
 # ============================================================================
 
 VW, VH = 1280, 720
@@ -1137,6 +1140,20 @@ MW_SIGHT_DY = 120.0        # 视野垂直容差（不分档 —— 改了会让�
                            #   等于在它头顶撬冰箱零风险。120 让桌面成为"看得见但够不着"的一层
                            #   （厨房台 397 dy=202 仍是安全高低差，高处优势保留）。
 MW_CATCH_R  = 52.0          # 抓捕半径（不分档 —— 这是"被抓住了"的判定，不该随难度漂）
+
+# ⭐ PR29 猫式索敌（Ronny 2026-10-10）：看到 ≠ 立刻追 —— 看见先潜伏，近了且看到后背才扑。
+#   ⛔ 这三个常量只作用于 Microwave.update 的 `s >= 1.0` 那一支和 _patrol 的 stalk 段。
+CAT_STALK_GAIN  = 0.18    # 潜伏期 alert 增速（原 alert_gain=2.5 ⇒ 慢约 14 倍）。
+                          #   ⛔ 想退回「看见就立刻满速涨」：把 update 里 CAT_STALK_GAIN 改成 self.alert_gain
+CAT_STALK_SPEED = 26.0    # 潜伏期匍匐接近速度（远低于追击 282 与链表 patrol_speed 120）。
+                          #   ⛔ 想退回「纯站岗（一点都不平移）」：把这里改 0.0，一行回退
+CAT_PURSUE_D    = 230.0   # 近到这个距离以内，且看到她的后背 ⇒ 满速涨 + 进 chase。
+                          #   ⛔ 想退回「看到就追」：把这个改成一个很大的数（如 99999）
+# ⭐ "真的看见"的门槛（team-lead 2026-10-11 裁定 A）：sense() 正面锥实测返回 **0.75~1.0**
+#   （`_v_pr29_stalk.py` ⑧ 扫描：front_min=0.7500 @ dx=sight），背后档只有 0.25、梯子 0.30
+#   ⇒ 0.5 是天然分界。⛔ 别改回 `s >= 1.0`：那样 sight 拉到 520 之后
+#     312~520px 那段会掉进听觉支(1.3/s)，出现「站远反而更快被发现」的涨速倒挂。
+CAT_SEEN_S      = 0.5
 ALERT_DECAY = 0.8           # 脱离视野每秒掉多少（不分档 —— 掉得快就没"绕开"这件事了）
 
 ACTOR_H = 132.0             # ⭐ 露娜在关卡里的高度（逻辑像素），反推缩放系数
@@ -1342,7 +1359,7 @@ NIGHTS = [
         # ⭐ 东端收到 1180：冰箱移到 1120~1250 之后，巡逻右端**不能进冰箱体**
         #   （冰箱是落地实心，y1=599 —— 与旧茶几同性质，会穿模）。
         "patrol": (760, 1108), "patrol_speed": 120.0,
-        "chase_speed": 282.0, "sight": 350.0, "hear": 180.0,
+        "chase_speed": 282.0, "sight": 520.0, "hear": 180.0,
         "alert_gain": 2.5, "alert_hear": 1.3,
     },
 ]
@@ -1364,10 +1381,12 @@ NIGHT_GAP = 0.30          # 结算：用时超过"带回数 × 这个秒数"就�
 # ============================================================================
 
 NARRATION = {
+    # ⭐ 2026-10-11 PR-30：设定从「半夜偷」改成「白天大中午偷」，
+    #   这三句原本全是夜词。⛔ 新文案是 Ronny 逐字给的，不许润色。
     "enter": [
-        "夜，安全。",
-        "厨房的灯灭了。该我了。",
-        "凌晨三点。整层楼只有冰箱在响。",
+        "中午，他在打盹。",
+        "阳光太亮了。正好，看得清。",
+        "这个点没人进厨房。",
     ],
     "wait": [
         "还没到时间。",
@@ -1375,7 +1394,7 @@ NARRATION = {
         "窝里这点不够。",
     ],
     "cross": [
-        "规矩我懂。但今晚例外。",
+        "规矩我懂。但今天例外。",
         "再往前一步，就算越界了。",
         "这条线我熟。闭着眼都能走。",
     ],
@@ -1415,7 +1434,7 @@ NARRATION = {
     ],
     "home": [
         "带回来了。",
-        "今晚到此为止。",
+        "今天就到这儿。",
         "这次收获还行。",
     ],
     "finish": [
@@ -2190,6 +2209,17 @@ class Microwave:
             return 0.25
         return 0.0
 
+    def _sees_back(self, luna) -> bool:
+        """⭐ PR29 她是不是背对我 —— 猫只在猎物露出后背时才扑（Ronny 2026-10-10）。
+
+        判据：她面朝的方向 与「从我指向她」的方向**同向** ⇒ 她背对我。
+            luna.face = +1（朝右），我在她左边 ⇒ luna.x - self.x > 0 ⇒ 积 > 0 ⇒ 背对我 ✅
+            luna.face = -1（朝左），她在我左边 ⇒ luna.x - self.x < 0 ⇒ 积 > 0 ⇒ 背对我 ✅
+            （积 < 0 = 她面朝我，我看着她的脸 ⇒ 不扑）
+        ⛔ 只取 luna.face，**不看我自己**的 face —— 我有没有在看她不影响"她背对我"这件事。
+        """
+        return luna.face * (luna.x - self.x) > 0
+
     def update(self, dt, luna, room):
         # ⛔ 越界才追：露娜退回允许区内，微波炉就当没看见 —— 这是"允许区机制"的核心
         trespass = luna.x > room.border_x and not luna.escort
@@ -2234,8 +2264,16 @@ class Microwave:
             # 锁定：每个周期刷新目标 x（他冲向最后已知位置）
             if luna.x > room.border_x:
                 self.fury_x = luna.x
-        elif s >= 1.0:
-            self.alert = min(1.0, self.alert + self.alert_gain * dt)
+        elif s > CAT_SEEN_S:
+            # ⭐ PR29 猫式索敌（Ronny 2026-10-10）：正面看到 ≠ 立刻追 —— 先潜伏，
+            #   只有「够近（≤CAT_PURSUE_D）+ 看到她的后背」才给满增速。
+            #   ⛔ 这一段只改"涨多快"，不改 chase 的速度，也不动 chase/return 的状态迁移。
+            #   ⛔ 判据用 `s > CAT_SEEN_S`（不是 `s >= 1.0`）：正面锥整个 0.75~1.0 区间
+            #      都要走猫规则，否则远距离那一段会掉到下面的听觉支 ⇒ 涨速随距离倒挂。
+            if abs(luna.x - self.x) <= CAT_PURSUE_D and self._sees_back(luna):
+                self.alert = min(1.0, self.alert + self.alert_gain * dt)
+            else:
+                self.alert = min(1.0, self.alert + CAT_STALK_GAIN * dt)
         elif s > 0.0:
             # ⚠️⚠️ 2026-10-06 实测澄清（**不是 bug，是设计现状，别"顺手修"**）：
             #   这一支的涨速恒为 `alert_hear`，**没有乘 `sense`**。
@@ -2258,6 +2296,15 @@ class Microwave:
             self.state = "chase"
         elif self.alert <= 0.02 and self.state == "chase":
             self.state = "patrol"
+        # ⭐ PR29 猫式索敌（Ronny 2026-10-10）：patrol ⇄ stalk 这对迁移挂在链的**尾部**，
+        #   ⛔ 不插到上面两条前面 —— chase 的进入/退出优先级必须保持不变。
+        #   ⭐ 这里的 `s > CAT_SEEN_S` 是刻意的（team-lead 2026-10-11 裁定 B）：
+        #     「**看到**之后先假装没看到」—— 只听见（背后档 s=0.25）不算，
+        #     那种情况按 Ronny 2026-10-06 拍板的听觉支照原样涨到 1.0。
+        elif self.state == "patrol" and s > CAT_SEEN_S and self.alert > 0.05:
+            self.state = "stalk"          # 看见了，但假装没看见（盯，不追）
+        elif self.state == "stalk" and self.alert <= 0.05:
+            self.state = "patrol"         # 她躲回去了，警戒掉回去 ⇒ 回到站岗
 
         # ============ investigate：走过去查看声源（2026-10-04 方向二）============
         # ⛔ 优先级铁律：chase 一律压过 investigate。
@@ -2358,6 +2405,19 @@ class Microwave:
             self.pause_t = 0.35
         if self.pause_t > 0.0:
             self.pause_t -= dt
+
+        # ⭐ PR29 猫式索敌：stalk = 看见了但假装没看见 —— 只盯着她，外加极慢匍匐接近。
+        #   ⛔ dispatch 不用改：update() 里 patrol / stalk / return 三个状态
+        #      本来就一起落进 `else: self._patrol(...)`（没有 `state=="patrol"` 那条分支）。
+        #   ⛔ patrol 的原行为（站着不动 + 定时扭头）一个字没动。
+        #     代价：上面第 2358 行的定时扭头会每 9 秒把脸翻走一次 ——
+        #     ⇒ 所以这段写在 _patrol 的**末尾**，每帧把脸拨回她 ⇒ 净效果「固定盯着她」。
+        #   ⛔ 这里不自行加新的 clamp：原来的 _patrol 没有任何位置夹取，遵循它。
+        #     位移上界是自封的 —— 慢涨 0.18/秒，5.6 秒涨满即转 chase，最多挪 ≈ 145px。
+        if self.state == "stalk":
+            self.face = 1 if luna.x > self.x else -1
+            if CAT_STALK_SPEED > 0.0:
+                self.x += self.face * CAT_STALK_SPEED * dt
 
     # ------------------------------------------------------------------
     def _investigate(self, dt):
@@ -2782,7 +2842,8 @@ class NightWindow(QWidget):
     def __init__(self, pack):
         super().__init__()
         self.pack = pack
-        self.setWindowTitle("猫猫公寓 · 夜间冒险（灰盒）")
+        # ⏳ 现在只有一档且是白天档所以写死；以后加夜档要回来按 `_is_day_level` 分流。
+        self.setWindowTitle("猫猫公寓 · 正午厨房")
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
         self.setAttribute(Qt.WA_OpaquePaintEvent, False)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -2816,6 +2877,11 @@ class NightWindow(QWidget):
         # ⭐ 2026-10-05 三档合一档 ⇒ 默认 0。⛔ 原来写 1（那时有 3 档），
         #   留1 会在只有 1 个元素时**启动就 IndexError**。
         self.night_idx = 0
+        # ⭐ 2026-10-11 PR-30：这一档是白天档吗？决定手电筒 / 菜单文案 / 底图配色。
+        #   ⛔ 必须走 `_is_day_level`，不许写死 True —— 以后加夜档要自动分流。
+        #   ⛔⛔ 三处都要赋值（`__init__` / `start_night` / `set_mode` play 分支），
+        #      漏一处 ⇒ 有一条进游戏路径拿到旧值（历史踩过这种漏改）。
+        self._day = _is_day_level(NIGHTS[self.night_idx])
         self.room = Room(NIGHTS[self.night_idx])
         # ⭐⭐⭐ PR13：读 room.spawn_luna（默认 = (NEST_X0+70, FLOOR_Y)，逐字相同）
         self.luna = Luna(self.room.spawn_luna[0], self.room.spawn_luna[1],
@@ -3268,6 +3334,10 @@ class NightWindow(QWidget):
             #      （比如他把桌布 y1 从 599 改成 520），改了就白改。
             self.room = Room(NIGHTS[self.night_idx], custom=self._room_custom(),
                              overrides=_ov)
+            # ⭐ PR-30：`self._day` 三处赋值之三（另两处：`__init__` / `start_night`）。
+            #   ⚠️ 这里**没有**局部 `cfg`（三个分支都直接索引 `NIGHTS[...]`），
+            #      ⛔ 别凭记忆写 `cfg`。
+            self._day = _is_day_level(NIGHTS[self.night_idx])
             self.luna.x, self.luna.y = self.room.spawn_luna
             self.luna.vy = 0.0
             self.luna.on_ground = True
@@ -4114,6 +4184,8 @@ class NightWindow(QWidget):
     def start_night(self, idx: int):
         cfg = NIGHTS[idx]
         self.night_idx = idx
+        # ⭐ PR-30：`self._day` 三处赋值之二（另两处：`__init__` / `set_mode` play 分支）。
+        self._day = _is_day_level(cfg)
         # ⭐⭐⭐ PR17 · 乙（Ronny 2026-10-10 拍板）：**正式开局也吃**自定义地形 + 5 类覆盖。
         #   ⛔ 改之前这里是 `Room(cfg)`：不吃 `custom`、不吃 `overrides`
         #      ⇒ 下面那句 `Luna(self.room.spawn_luna...)` 是**死代码**
@@ -5393,21 +5465,23 @@ class NightWindow(QWidget):
         p.setBrush(QColor(10, 12, 20, 190))
         p.drawRect(QRectF(0, 0, VW, VH))
 
+        # ⭐⭐ 2026-10-11 PR-30：原来这段**同一次绘制里画了两遍**（完全重复的两块），
+        #   删掉第二遍只留一处，并按白天/夜间分流文案。
+        #   ⛔ 新文案是 Ronny 逐字给的，⛔ 不许改标点不许润色
+        #      （副标末尾是**半角波浪号 `~`** U+007E，与 `NIGHTS[0]["sub"]` 一致）。
+        if self._day:
+            _title = "猫猫公寓 · 正午厨房"
+            _sub = "阳光正好，他在打盹。我来看看屋里有什么吃的~"
+        else:
+            _title = "猫猫公寓 · 夜间冒险"
+            _sub = "深夜的公共区域。拿点东西回来。"
         p.setPen(QColor(240, 226, 196))
         f = QFont("Microsoft YaHei", 34)
         p.setFont(f)
-        p.drawText(QRectF(0, 96, VW, 52), Qt.AlignCenter, "猫猫公寓 · 夜间冒险")
+        p.drawText(QRectF(0, 96, VW, 52), Qt.AlignCenter, _title)
         p.setFont(QFont("Microsoft YaHei", 14))
         p.setPen(QColor(160, 158, 172))
-        p.drawText(QRectF(0, 148, VW, 28), Qt.AlignCenter, "深夜的公共区域。拿点东西回来。")
-
-        p.setPen(QColor(240, 226, 196))
-        f = QFont("Microsoft YaHei", 34)
-        p.setFont(f)
-        p.drawText(QRectF(0, 96, VW, 52), Qt.AlignCenter, "猫猫公寓 · 夜间冒险")
-        p.setFont(QFont("Microsoft YaHei", 14))
-        p.setPen(QColor(160, 158, 172))
-        p.drawText(QRectF(0, 148, VW, 28), Qt.AlignCenter, "深夜的公共区域。拿点东西回来。")
+        p.drawText(QRectF(0, 148, VW, 28), Qt.AlignCenter, _sub)
 
         # 三张卡
         cw, ch, gap = 260, 214, 34
@@ -5549,6 +5623,38 @@ class NightWindow(QWidget):
                             QRectF(0, 0, self.bg_img.width(), self.bg_img.height()))
 
     def _draw_bg(self, p):
+        # ⭐⭐ 2026-10-11 PR-30：白天档换一套暖色白天参数。
+        #   ⛔ **只改颜色数值**，几何/位置一个都不许动（两点坐标、半径全照抄）。
+        #   ⛔⛔ 夜间（else）分支原样保留。
+        #   ⛔⛔ 不许把 `_draw_bg` 换成 `_draw_bg_slices`（那个要 Ronny 拍板，不在本单）。
+        if self._day:
+            g = QLinearGradient(0, 0, 0, VH)
+            g.setColorAt(0.0, QColor(232, 222, 205))
+            g.setColorAt(1.0, QColor(198, 184, 164))
+            p.fillRect(QRectF(0, 0, VW, VH), QBrush(g))
+
+            # 窗（左上，大中午的天光）
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(237, 230, 216))          # 窗外框
+            p.drawRoundedRect(QRectF(60, 60, 210, 190), 6, 6)
+            p.setBrush(QColor(203, 224, 240))          # 玻璃：亮天光
+            p.drawRoundedRect(QRectF(72, 72, 186, 166), 4, 4)
+            # 窗框十字保留（那是窗，不是夜）
+            p.setBrush(QColor(237, 230, 216))
+            p.drawRect(QRectF(160, 72, 8, 166))
+            p.drawRect(QRectF(72, 150, 186, 8))
+            # 暖阳光斑洒在地上（中心点与半径与夜间月光完全一致）
+            mg = QRadialGradient(QPointF(200, 470), 40, QPointF(200, 470), 340)
+            mg.setColorAt(0, QColor(255, 236, 190, 70))
+            mg.setColorAt(1, QColor(255, 236, 190, 0))
+            p.fillRect(QRectF(0, 260, 620, VH - 260), QBrush(mg))
+
+            # 远景家具剪影（灰盒：几个色块，给房间一点纵深）
+            p.setBrush(QColor(150, 138, 120))
+            p.drawRoundedRect(QRectF(980, 470, 260, 178), 8, 8)     # 冰箱
+            p.drawRect(QRectF(300, 400, 120, 248))                   # 柜子
+            return
+
         g = QLinearGradient(0, 0, 0, VH)
         g.setColorAt(0.0, QColor(18, 20, 34))
         g.setColorAt(1.0, QColor(38, 34, 46))
@@ -6021,16 +6127,30 @@ class NightWindow(QWidget):
         #   ⛔ 只改这一处就够：下面视野锥 / 本体 / `_draw_mw_box` 全用这个局部 `x`。
         x = m.x if x_override is None else float(x_override)
         y = m.y
-        # 视野（只在追击时才明显，巡逻时很淡）
-        a = int(40 + 70 * m.alert)
-        vg = QLinearGradient(x, y - 40, x + m.face * m.sight, y - 40)
-        vg.setColorAt(0, QColor(255, 170, 80, a))
-        vg.setColorAt(1, QColor(255, 170, 80, 0))
-        p.setBrush(QBrush(vg))
-        p.setPen(Qt.NoPen)
         fx = x + m.face * m.sight
-        p.drawPolygon([QPointF(x, y - 70), QPointF(fx, y - 230),
-                       QPointF(fx, y + 30), QPointF(x, y - 20)])
+        # ⭐⭐ 2026-10-11 PR-30（Ronny 拍板）：**白天档没有手电筒**。
+        #   原来不管什么档都填一坨橙色渐变（QColor(255,170,80,a)），白天看着就是
+        #   「大中午打手电」，设定对不上 ⇒ 白天档改成**极淡虚线轮廓、不填充**。
+        #   ⛔⛔ 夜间（else）分支**原样保留，一个像素都不许改**。
+        if self._day:
+            # alpha：巡逻时 70（几乎看不见，只是"他在往这边看"的提示），
+            #   追击时提到 130 —— 让"他在追你"仍有警示，别把危险信号一起删了。
+            _a = 130 if m.state == "chase" else 70
+            p.setBrush(Qt.NoBrush)          # ⛔ 白天档不许填充
+            p.setPen(QPen(QColor(120, 110, 96, _a), 1.5, Qt.DashLine))
+            p.drawPolygon([QPointF(x, y - 70), QPointF(fx, y - 230),
+                           QPointF(fx, y + 30), QPointF(x, y - 20)])
+            p.setPen(Qt.NoPen)
+        else:
+            # 视野（只在追击时才明显，巡逻时很淡）
+            a = int(40 + 70 * m.alert)
+            vg = QLinearGradient(x, y - 40, x + m.face * m.sight, y - 40)
+            vg.setColorAt(0, QColor(255, 170, 80, a))
+            vg.setColorAt(1, QColor(255, 170, 80, 0))
+            p.setBrush(QBrush(vg))
+            p.setPen(Qt.NoPen)
+            p.drawPolygon([QPointF(x, y - 70), QPointF(fx, y - 230),
+                           QPointF(fx, y + 30), QPointF(x, y - 20)])
 
         # ⭐ 本体：优先用真帧（派单 35 单 C），缺帧时退回灰盒方块
         _mf = self.gframes.get("mw_walk") or []

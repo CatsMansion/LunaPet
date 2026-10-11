@@ -26,6 +26,59 @@ from pet_engine import night as N
 
 pack = load_pack(os.path.join(HERE, "packs", "luna"))
 w = N.NightWindow(pack)
+
+# ============================================================================
+# ⭐⭐ 测试用容器注入（2026-10-11 · PR29b 收口，programmer-5）
+#   背景：Ronny 2026-10-10 授权把 NIGHTS[0]["stashes"] 清成了 []，
+#         而 `Room.__init__` 是**每次开档重建**的 ⇒ `w.start_night()` 之后
+#         `room.stashes` 恒为空 ⇒ ⑧ 段第 325 行 `w.room.stashes[0]` 直接 IndexError，
+#         脚本被打断 —— ⑧ 之后那些判据**一条都没执行过**（不是"跳过"，是压根没跑到）。
+#   ⛔ 这里**只补数据**，⛔ 一个判据都没改。
+#
+#   为什么要包一层 `start_night` 而不是在 ⑧ 段开头补一次：
+#     ① 这份脚本里有 21 处 `w.start_night(0)`（还有 3 处在缩进块里），
+#        逐个插桩必然漏 ⇒ 漏一处就是后面整段白跑；
+#     ② 逐个插桩要动到已有代码行，包一层的话**现有代码一行都不动**。
+#   ⛔ 只在这个脚本里生效（改的是类对象上的属性，不动 night.py 源码）。
+# ============================================================================
+_TEST_STASHES = [
+    # ⭐ 坐标沿用 `_NIGHT1` 的浅处那三条（够得到），三档各留一个：
+    #   loose / jar / plate —— 后面的判据会按 kind 挑（例如"拿一个 jar"）。
+    {"x": 470.0, "y": 488.0, "icon": "yolk",   "kind": "loose"},
+    {"x": 650.0, "y": 488.0, "icon": "yogurt", "kind": "jar"},
+    {"x": 830.0, "y": 380.0, "icon": "salmon", "kind": "plate"},
+]
+
+
+def inject_stashes():
+    """给当前 room 补上测试容器 —— 连带 `Room.__init__` 里会解算出的那几个派生字段。"""
+    if getattr(w.room, "stashes", None):
+        return                                  # Ronny 之后把容器加回来 ⇒ 自动让位
+    print("⏳ 注入测试容器（NIGHTS[0].stashes 为空 ⇒ 不补的话 ⑧ 段之后全跑不了）")
+    out = []
+    for s in _TEST_STASHES:
+        spec = N.KIND_TABLE[s["kind"]]
+        out.append(dict(s, noise=spec["noise"], fury=spec["fury"],
+                        value=spec["value"], hit=spec["hit"],
+                        taken=False, broken=False))
+    w.room.stashes = out
+    # ⭐ 图标：`__init__` 里 `_all_ic` 是从 NIGHTS 现算的，现在 NIGHTS 里没有容器
+    #   ⇒ `self.icons` 是空的 ⇒ 画的时候 icons.get(icon) 取到 None。
+    for k, im in N._load_icons(pack.root,
+                               sorted({s["icon"] for s in out})).items():
+        w.icons.setdefault(k, im)
+
+
+_orig_start_night = N.NightWindow.start_night
+
+
+def _start_night_with_stashes(self, idx):
+    _orig_start_night(self, idx)
+    inject_stashes()
+
+
+N.NightWindow.start_night = _start_night_with_stashes
+
 w.start_night(0)               # ⭐ 2026-10-03 起初始是选档菜单，测试直接进「深夜」
 
 # ---- 可控时钟 ----

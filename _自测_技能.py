@@ -40,6 +40,49 @@ from pet_engine import night as N
 pack = load_pack(os.path.join(HERE, "packs", "luna"))
 w = N.NightWindow(pack)
 
+# ============================================================================
+# ⭐⭐ 测试用容器注入（2026-10-11 · PR29b 收口，programmer-5）
+#   背景：Ronny 2026-10-10 授权把 NIGHTS[0]["stashes"] 清成 []，而 Room 每开档重建
+#   ⇒ `w.start_night()` 之后 `room.stashes` 恒为空 ⇒ 第 160 行 `w.room.stashes[0]`
+#      IndexError 打断脚本，"攻击能击碎身前的容器"那一段往后**一条都没跑过**。
+#   ⛔ 这里**只补数据**，⛔ 一个判据都没改。
+#   做成 `start_night` 的包装，是为了让 `fresh()` 每次重建 room 之后都自动补上
+#   （否则只补一次的话，下一次 fresh() 又变回空的）。
+#   ⛔ 只在这个脚本里生效（改的是类对象上的属性，不动 night.py 源码）。
+# ============================================================================
+_TEST_STASHES = [
+    {"x": 470.0, "y": 488.0, "icon": "yolk",   "kind": "loose"},   # 浅处：够得到
+    {"x": 650.0, "y": 488.0, "icon": "yogurt", "kind": "jar"},
+    {"x": 830.0, "y": 380.0, "icon": "salmon", "kind": "plate"},
+]
+
+
+def inject_stashes():
+    if getattr(w.room, "stashes", None):
+        return                                  # Ronny 之后把容器加回来 ⇒ 自动让位
+    print("⏳ 注入测试容器（NIGHTS[0].stashes 为空 ⇒ 不补的话攻击打容器的判据全跑不了）")
+    out = []
+    for s in _TEST_STASHES:
+        spec = N.KIND_TABLE[s["kind"]]
+        out.append(dict(s, noise=spec["noise"], fury=spec["fury"],
+                        value=spec["value"], hit=spec["hit"],
+                        taken=False, broken=False))
+    w.room.stashes = out
+    for k, im in N._load_icons(pack.root,
+                               sorted({s["icon"] for s in out})).items():
+        w.icons.setdefault(k, im)
+
+
+_orig_start_night = N.NightWindow.start_night
+
+
+def _start_night_with_stashes(self, idx):
+    _orig_start_night(self, idx)
+    inject_stashes()
+
+
+N.NightWindow.start_night = _start_night_with_stashes
+
 _T = [0.0]
 time.perf_counter = lambda: _T[0]
 
