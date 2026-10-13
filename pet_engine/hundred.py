@@ -70,8 +70,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
 from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QLinearGradient,
-                           QFont, QFontDatabase, QFontMetricsF, QPolygonF)
+                           QFont, QFontDatabase, QFontMetricsF, QPolygonF,
+                           QImage)
 from PySide6.QtWidgets import QWidget, QApplication
+
+# ⭐ PR32：露娜素材装载。⛔ 不在本文件重写第二份 _load_needed —— 直接复用 night.py 的。
+#   silhouette_of 在 ui.py:51（import 路径照 night.py:39-44 抄）。
+try:                                    # 包内导入 / 直接跑脚本 两种都支持
+    from .night import _load_needed
+    from .ui import silhouette_of
+except ImportError:
+    from night import _load_needed
+    from ui import silhouette_of
 
 # ============================================================================
 # ⭐⭐ 字体注册（v5补上—— 之前**根本没有**，所以中文全是豆腐块）
@@ -432,6 +442,41 @@ def plat_overlap(f: int) -> float:
 # ============================================================================
 # 角色
 # ============================================================================
+# ⭐⭐ PR32：装露娜桌宠的素材（Ronny：「我们的素材都是通用的，把另一个游戏也挂装满」）
+#
+#  装哪些：7 个动作，一个不多一个不少（⛔ 别自己加）：
+#    idle / walk / human_run / jump / fall / land / land_settle
+#  ⛔ 明确不装：climb/sneak/turn_*（没梯子没潜行没转身）、drag_*（没鼠标抓取）、
+#    sleep_*/stretch/eat/pat/brush（没待机互动）、tease（PR15 起 Ronny 拍板
+#    「不应该在游戏里」）、gorilla_run（设计禁用）、eat（帧位/anchor 未校准）。
+#
+#  ⛔⛔ 帧数以 pet.json 为权威，按 `^<name>_[0-9]+\.png$` 核验：
+#    `land_*`  glob 会把 land_settle 算进来（⇒32，实际 16）；
+#    `jump_*`  glob 会把 jump_excited 算进来（⇒32，实际 16）。
+#
+#  ⛔ 视觉与物理解耦：精灵按**脚底锚点**贴 h.y，BODY_W=32 / 命中中心 h.y-21.0 /
+#    GROUND_SNAP / FLOOR_H / plat_width / plat_center / cam_y **一律不动**。
+HUNDRED_ACTIONS = ["idle", "walk", "human_run", "jump", "fall", "land", "land_settle"]
+
+HUNDRED_ACTOR_H = 84.0    # ⭐ 角色视觉高（逻辑 px）。层间距 FLOOR_H=110 ⇒ 留 26px 净空；
+                          #   窗口按屏高放大 1.6 倍 ⇒ 4K 下实际显示 ~134px，细节够读。
+                          #   ⛔ 只改视觉缩放，不动物理（见上一段）。
+
+# fps 覆盖表（一百层自建，⛔ 别改 pet.json）。
+#  ⭐ jump 从 pack 的 10.0 提到 24.0：一百层是快节奏掉落游戏，10fps 的上升段发黏。
+HUNDRED_FPS = {"idle": 10.0, "walk": 12.5, "human_run": 24.0,
+               "jump": 24.0, "fall": 25.0, "land": 25.0, "land_settle": 12.0}
+
+# once 动作：播完**钳在末帧**不循环（pack loop=once）。
+#  cycle 动作（idle/walk/human_run）正常取模。
+HUNDRED_ONCE = ("jump", "fall", "land", "land_settle")
+
+# 速度阈值（逻辑 px/s，⛔ 视觉档位，不碰物理）：
+#   |vx| > HUNDRED_RUN_V  ⇒ human_run（快档）；其余移动 ⇒ walk；≈0 ⇒ idle。
+HUNDRED_RUN_V   = 120.0
+HUNDRED_MOVE_EPS = 1.0    # 低于此视为「站着不动」（松手摩擦会把 vx 打到精确 0）
+
+
 class Climber:
     """爬梯人。x / y(脚底)，与 night.py 的 Luna 同一套约定。
 
@@ -449,6 +494,13 @@ class Climber:
         self.face = 1
         self.leg = 0.0
         self.squash = 0.0
+        # --- ⭐ PR32：露娜素材动画状态（⛔ 纯视觉字段，不参与任何物理判定）---
+        #   act        当前动作名（∈ HUNDRED_ACTIONS）
+        #   t          帧推进量（秒）；换动作时归零，按 HUNDRED_FPS 换算帧下标
+        #   land_stage 落地状态机："" / "land"（触地冲击）/ "settle"（冲击后站稳）
+        self.act = "idle"
+        self.t = 0.0
+        self.land_stage = ""
         # --- ⭐ v5：商店效果（默认 1.0 / AIR_JUMPS = 没买）---
         # ⛔ 都做成**乘性倍率**而不是改常量：常量是全局的，改了会连带影响
         #   落点判定与死亡线（v4.1 那次教训：_WINDOW_F 一个常量两个用途已经炸过一次）。
@@ -584,11 +636,40 @@ class HundredWindow(QWidget):
         self.k = max(0.7, min(1.6, k))
         self.setFixedSize(int(VW * self.k), int(VH * self.k))
 
+        # ---- ⭐ PR32：角色素材（按需加载，复用 night.py 的 _load_needed）----
+        #   ⛔ 不在本文件重写第二份加载逻辑；silhouette_of 由 alpha 并集算真实轮廓高，
+        #      再反推缩放系数 s（⛔ 不按图片像素另算一条路径 —— night.py 的 tease
+        #      事故就是两条缩放路径混用导致角色大 3.8 倍）。
+        self.imgs = {}
+        self.s = 0.0
+        if pack is not None:
+            self.imgs = _load_needed(pack, HUNDRED_ACTIONS)
+            if "idle" not in self.imgs:
+                raise RuntimeError("角色包里没有 idle 帧，跑不起来")
+            sil = silhouette_of(self.imgs["idle"], pack.anchor_of("idle"))
+            body_h = float(sil[3] - sil[2])
+            self.s = HUNDRED_ACTOR_H / body_h if body_h > 1 else 0.26
+            print("[一百层] 角色本体高 %.0fpx（画布）→ s=%.4f → 游戏里 %.0fpx"
+                  % (body_h, self.s, HUNDRED_ACTOR_H))
+            _miss = [n for n in HUNDRED_ACTIONS if n not in self.imgs]
+            if _miss:
+                print("[一百层] ⚠️ 这些动作一帧都没加载上：%s"
+                      "（切过去会告警 + 显式降级，⛔ 不静默画 idle）" % "、".join(_miss))
+        else:
+            # ⛔ 不许静默兜底：没传 pack 就明说，_draw_hero 直接不画角色。
+            print("[一百层] ⚠️ 未传入 pack：角色素材未加载（裸跑/无参构造），本窗口不画角色")
+        # 缺帧告警去重（⛔ 不许每帧刷屏，也不许默默画成 idle）
+        self._warned_missing = set()
+        self._warned_no_pack = False
+
         # ---- 状态 ----
         self.phase = "title"          # title | play | dead | win | shop
         self.floor = 1
         self.best = 0
-        self.hero = None
+        # ⭐ PR32：标题画面也要有角色站着（派单 §2：phase==title → idle 看板）。
+        #   ⛔ start() 会重建 hero ⇒ 不影响开局物理；纯视觉。
+        self.hero = Climber(plat_center(1), self._plat_y(1))
+        self.hero.on_ground = True
         self.cam_y = 0.0              # ⭐ 镜头纵向偏移（>0 表示世界往上移）
         self.flash = 0.0
         self.shake = 0.0
@@ -792,6 +873,11 @@ class HundredWindow(QWidget):
             self.dead_t += dt
         elif self.phase == "win":
             self.win_t += dt
+        # --- ⭐ PR32：角色动画推进（按状态选动作 + 帧推进，派单 §2/§3）---
+        #   title / win 也要走（看板得动）；dead 也要走（fall 播完钳末帧 = 坠落演出）。
+        #   ⛔ shop 不走：商店是暂停，动画冻住才读得懂"这是暂停不是卡了"。
+        if self.hero is not None and self.phase != "shop":
+            self._step_anim(self.hero, dt)
         self.update()
 
     # ------------------------------------------------------------ v5 障碍
@@ -968,6 +1054,10 @@ class HundredWindow(QWidget):
                 h.y = float(best)
                 h.vy = 0.0
                 h.on_ground = True
+                # --- ⭐ PR32：触地瞬间（air→ground 跳变）⇒ 进落地状态机。
+                #   ⛔ 纯视觉字段，不参与任何物理判定（动物理的一个字都没改）。
+                h.land_stage = "land"
+                h.t = 0.0        # 冲击从首帧重播（同一动作连续落地也要重播）
                 h.air_jumps = int(h.boost["air_jumps"])
                 # ⭐⭐ 落地刹速**必须 gate 在 was_air 上**。
                 #   ⛔⛔ v4.1 修掉的死 bug：不 gate 的话，「站着不动」时
@@ -1056,6 +1146,110 @@ class HundredWindow(QWidget):
     def _say(self, s, dur=1.5):
         self.msg, self.msg_t = s, dur
 
+    # ------------------------------------------------ ⭐ PR32：角色动画（露娜素材）
+    def _can_play(self, name: str) -> bool:
+        """⭐ 这个动作**真的有帧可播吗**（night.py:4283 `_can_play` 同款）。
+
+        ⛔ 不能写 `name in self.pack.actions` —— 占位注册在 actions 里但盘上没帧；
+           NEED/HUNDRED_ACTIONS 之外的动作压根没被读进 self.imgs。
+           两种情况下画面都会静默退化成 idle（看着就是"没实装"）。
+        """
+        return bool(self.imgs.get(name))
+
+    def _n_frames(self, name: str) -> int:
+        imgs = self.imgs.get(name)
+        return len(imgs) if imgs else 0
+
+    def _gate(self, name: str) -> str:
+        """切到非 idle 动作前的**缺帧闸门**（派单 §4-1：不许静默兜底）。
+
+        缺帧 ⇒ print 告警（每个动作只报一次，⛔ 不每帧刷屏，也⛔ 不算静默）
+             + 显式降级为 idle。
+        """
+        if name == "idle" or self._can_play(name):
+            return name
+        if name not in self._warned_missing:
+            self._warned_missing.add(name)
+            print("[一百层] ⚠️ 缺 %s 的帧（一帧都没加载上）⇒ 显式降级为 idle"
+                  "（这是告警后的降级，⛔ 不是静默画 idle）" % name)
+        return "idle"
+
+    def _ground_act(self, h) -> str:
+        """地面三档：|vx| > 120 ⇒ human_run（快）；还在动 ⇒ walk；≈0 ⇒ idle。"""
+        sp = abs(h.vx)
+        if sp > HUNDRED_RUN_V:
+            return "human_run"
+        if sp > HUNDRED_MOVE_EPS:
+            return "walk"
+        return "idle"
+
+    def _pick_action(self, h) -> str:
+        """⭐ PR32：状态 → 动作名（派单 §2 映射表 + 落地状态机）。
+
+        相位：title / win / shop ⇒ idle；dead ⇒ fall（once，播完钳末帧 = 坠落演出）。
+        play：空中 vy<0 ⇒ jump / vy>=0 ⇒ fall；地面按 |vx| 三档。
+
+        ⭐ 落地状态机（本单唯一新增的状态逻辑，手感关键 —— Ronny 玩洛克人/银河战士，
+          **落地不许锁操作**）：
+          ① 触地 ⇒ land（16 帧 @25fps ≈ 0.64s）
+             ⭐ team-lead 2026-10-12 裁定④：起跳**立刻切空中**（物理先动、姿态跟物理，
+               ⛔ 不许「人在空中还播落地冲击」的撕裂；下扑 vy>0 ⇒ fall / 滞空救 vy<0 ⇒ jump）
+             ⛔ 可被移动打断（着地时按方向键 ⇒ 立刻切 walk/human_run）
+          ② land 播完且站着且 |vx|≈0 ⇒ land_settle（只在站稳时播，也可被方向键打断）
+          ③ land_settle 播完 ⇒ 回常规判定
+          ④ 离地（起跳/走出边缘）⇒ 清掉落地状态，按空中分流
+        """
+        if self.phase == "dead":
+            return self._gate("fall")
+        if self.phase != "play":
+            return "idle"                      # title / win / shop
+        # ---- play ----
+        if h.land_stage == "land":
+            if not h.on_ground:
+                # ⭐ team-lead 2026-10-12 裁定④（推翻派单字面「不可被跳跃打断」）：
+                #   物理先动、姿态必须跟物理 —— 起跳立刻清 land_stage 并按空中分流，
+                #   ⛔ 不许出现「人已经在空中却还在播落地冲击」的撕裂。
+                #   ⚠️ 本游戏地面起跳 vy=+150 是**下扑** ⇒ 按 §2 走 fall；
+                #     滞空救 vy<0 才走 jump（⛔ 不按字面一律切 jump，那会让下扑播上升姿势）。
+                h.land_stage = ""
+                return self._gate("jump" if h.vy < 0 else "fall")
+            if abs(h.vx) > HUNDRED_MOVE_EPS:   # 着地时：移动打断（规则不变）
+                h.land_stage = ""
+                return self._gate(self._ground_act(h))
+            if int(h.t) < self._n_frames("land"):
+                return "land"
+            h.land_stage = "settle"            # 播完且站稳 ⇒ 进站稳
+            return self._gate("land_settle")
+        if h.land_stage == "settle":
+            if not h.on_ground:                # ⭐ 只在站稳时播：离地就清
+                h.land_stage = ""
+                return self._gate("jump" if h.vy < 0 else "fall")
+            if abs(h.vx) > HUNDRED_MOVE_EPS:   # 也可被方向键打断
+                h.land_stage = ""
+                return self._gate(self._ground_act(h))
+            if int(h.t) < self._n_frames("land_settle"):
+                return "land_settle"
+            h.land_stage = ""                  # 播完 ⇒ 常规判定
+            return self._gate(self._ground_act(h))
+        if not h.on_ground:
+            h.land_stage = ""                  # 空中再次起跳 ⇒ 清掉落地状态
+            return self._gate("jump" if h.vy < 0 else "fall")
+        return self._gate(self._ground_act(h))
+
+    def _step_anim(self, h, dt):
+        """帧推进（night.py:4985-5004 同款）：换动作 t 归零；t += dt*fps。
+
+        ⛔ fps 走 HUNDRED_FPS 查表，不写死；表里没有才回落 pack 自带的 fps。
+        """
+        a = self._pick_action(h)
+        if a != h.act:
+            h.act, h.t = a, 0.0
+        fps = HUNDRED_FPS.get(a)
+        if fps is None:
+            act = self.pack.actions.get(a) if self.pack is not None else None
+            fps = act.fps if act is not None else 10.0
+        h.t += dt * fps
+
     # ------------------------------------------------------------ 绘制
     def paintEvent(self, ev):
         p = QPainter(self)
@@ -1099,7 +1293,13 @@ class HundredWindow(QWidget):
             p.setBrush(QColor(255, 214, 150, int(70 * al)))
             p.drawEllipse(QPointF(tx, ty - 12), 5.0, 7.0)
 
-        if self.hero is not None:
+        # ---- hero ----
+        # ⭐ PR32 + team-lead 2026-10-12 裁定③：**title 相位**的 hero 画在 overlay
+        #   **之后**（overlay alpha=190 会把 hero 压到约 25% 亮度、几乎看不见）。
+        #   ⛔ 只此一处：play / dead / win / shop 四个相位的绘制顺序一律不动。
+        #   ⛔ 不改 overlay 本身的 alpha；⛔ 不挪 hero 的位置（title 时 cam_y 恒为 0，
+        #      世界坐标即屏幕坐标，overlay 后直接画不会偏）。
+        if self.hero is not None and self.phase != "title":
             self._draw_hero(p, self.hero)
         p.restore()
 
@@ -1108,6 +1308,8 @@ class HundredWindow(QWidget):
             self._draw_overlay(p)
         elif self.phase == "shop":
             self._draw_shop(p)
+        if self.hero is not None and self.phase == "title":
+            self._draw_hero(p, self.hero)     # ⭐ 裁定③：overlay 之后重画（只 title）
         p.end()
 
     def _draw_shop(self, p):
@@ -1251,52 +1453,43 @@ class HundredWindow(QWidget):
                 p.drawText(QRectF(lcx - 40, y - 76, 80, 18), Qt.AlignCenter, "被发现！")
 
     def _draw_hero(self, p, h):
-        """纯程序绘制。⛔ 不画脸（2.5 头身资源全是侧面手绘，程序正面小人掉档）。
+        """⭐ PR32：贴露娜素材帧（缩放路径逐行照抄 night.py:6374-6387）。
 
-        ⭐ v4 新增：**朝向**由 h.face 决定（左右键），
-          走路动画由 |vx| 驱动 —— 站着不动时不该有迈腿，否则像滑步。
+        旧版是纯程序矢量猫（25×42 圆角矩形身 + r=12.5 椭圆头 + 两个三角耳，
+        注释自己写着「⛔ 不画脸」）—— 已整体替换为按动作播帧。
+
+        ⛔⛔ 视觉与物理解耦：精灵以**脚底锚点**贴 h.y（translate 脚底 → face<0 镜像
+           → drawImage），BODY_W=32 / 命中中心 h.y-21.0 / GROUND_SNAP / FLOOR_H
+           / plat_width / plat_center / cam_y **一律不动**，缩放只乘在视觉上。
+        ⛔ 缩放系数统一乘在 canvas 上（cw*s / ch*s），⛔ 不许按图片实际像素另算
+           一条路径 —— night.py 的 tease 事故（640×640 画布走错路径 ⇒ 角色大
+           3.8 倍）就是两条路径混用导致的。
+        ⭐ per-action canvas/anchor 必须走 pack.canvas_of()/anchor_of()
+          —— human_run/jump 是 512×640，⛔ 不许假设都是 512×512。
         """
-        sq = h.squash
-        sw, sh = 1.0 + 0.26 * sq, 1.0 - 0.22 * sq
-        bw, bh = 25.0 * sw, 42.0 * sh
-        x, y = h.x, h.y
-        p.setPen(Qt.NoPen)
-        # ⭐ 迈腿频率跟**速度**走，不是跟时间走
-        spd = abs(h.vx) / max(1.0, RUN_MAX)
-        ph = (int(h.leg * (5.0 + 7.0 * spd)) % 2)
-        moving = h.on_ground and spd > 0.06
-        # 身体整体按朝向镜像（⛔ 别镜像文字/文字层，只镜像这个角色）
+        if not self.imgs:
+            # ⛔ 不许静默兜底：一帧都没加载上（pack 未传入）就明说，不画角色。
+            if not self._warned_no_pack:
+                self._warned_no_pack = True
+                print("[一百层] ⛔ 没有角色帧可画（pack 未传入）⇒ 本窗口不画角色")
+            return
+        imgs = self.imgs.get(h.act) or self.imgs["idle"]
+        cw, ch = self.pack.canvas_of(h.act)
+        ax, ay = self.pack.anchor_of(h.act)
+        if h.act in HUNDRED_ONCE:
+            # once 动作（jump/fall/land/land_settle）：钳在末帧，不循环播
+            idx = min(int(h.t), len(imgs) - 1)
+        else:
+            # cycle 动作（idle/walk/human_run）：正常取模
+            idx = int(h.t) % len(imgs)
+        im = imgs[idx]
+        s = self.s
         p.save()
-        p.translate(x, y)
-        p.scale(h.face if h.face else 1, 1.0)
-        p.translate(-x, -y)
-        for dx, op in ((-6.0, 0), (3.0, 1)):
-            lift = 3.0 if (moving and ph == op) else 0.0
-            p.setBrush(QColor(140, 112, 74))
-            p.drawRoundedRect(QRectF(x + dx, y - 6.0 - lift, 5.0, 9.0), 2, 2)
-        # 身
-        p.setBrush(QColor(204, 168, 108))
-        p.drawRoundedRect(QRectF(x - bw / 2, y - bh - 6.0, bw, bh), 9, 9)
-        # 尾（⛔ 只在有速度时甩起来，静止时垂着 —— v4 才有"活着"的感觉）
-        p.setBrush(QColor(186, 150, 96))
-        _tw = 8.0 + 6.0 * spd if moving else 0.0
-        p.drawRoundedRect(QRectF(x - bw / 2 - 5.0, y - bh * 0.55 - _tw, 5.0,
-                                  bh * 0.55 + _tw), 2, 2)
-        # 头
-        hr = 12.5 * sw
-        p.setBrush(QColor(232, 198, 150))
-        p.drawEllipse(QPointF(x, y - bh - 6.0 - hr * 0.45), hr, hr * 1.05)
-        # 耳（金棕 + 银色挑染的暗示）
-        p.setBrush(QColor(214, 178, 118))
-        p.drawPolygon(QPolygonF([QPointF(x - 7, y - bh - 12.0),
-                                 QPointF(x - 9, y - bh - 23.0),
-                                 QPointF(x - 1, y - bh - 17.0)]))
-        p.drawPolygon(QPolygonF([QPointF(x + 7, y - bh - 12.0),
-                                 QPointF(x + 9, y - bh - 23.0),
-                                 QPointF(x + 1, y - bh - 17.0)]))
-        if self.flash > 0.02:
-            p.setBrush(QColor(255, 240, 190, int(130 * self.flash / 0.2)))
-            p.drawEllipse(QPointF(x, y - bh * 0.6), bw * 1.4, bw * 1.4)
+        p.translate(h.x, h.y)               # 脚底中点
+        if h.face < 0:
+            p.scale(-1.0, 1.0)              # 素材源统一朝右，朝左才镜像
+        p.drawImage(QRectF(-ax * s, -ay * s, cw * s, ch * s),
+                    im, QRectF(0, 0, cw, ch))
         p.restore()
 
     def _draw_hud(self, p):
@@ -1388,7 +1581,15 @@ def f_of_y(y):
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    HundredWindow().show()
+    # ⭐ PR32：裸跑也把 pack 传进去（⛔ __init__ 签名不变，仍保留 pack=None 默认值
+    #   —— 有 6 处自测是无参构造的）。pack_dir 定位照 night.py:6473 抄。
+    try:
+        from core import load_pack
+    except ImportError:
+        from .core import load_pack
+    here = os.path.dirname(os.path.abspath(__file__))
+    pack_dir = os.path.join(os.path.dirname(here), "packs", "luna")
+    HundredWindow(load_pack(pack_dir)).show()
     sys.exit(app.exec())
 
 

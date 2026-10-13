@@ -67,6 +67,15 @@ def inject_stashes():
     for k, im in N._load_icons(pack.root,
                                sorted({s["icon"] for s in out})).items():
         w.icons.setdefault(k, im)
+    # ⭐⭐ 2026-10-12 设计端补注入：冰箱食物池。
+    #   `FRIDGE_FOODS = []`（night.py:905，Ronny 2026-10-10 授权容器全清）⇒
+    #   `Room.__init__` 派生出 `fridge_left = []` ⇒ `_qte_start()` 第一行就 return
+    #   ⇒ **QTE 从来没启动过**，于是「QTE 锁移动」那条判据自 10-10 起**空转了 10 天**
+    #   （它断言 `w.qte is not None`，而 qte 恒为 None ⇒ 恒红，但红的原因不是锁失效）。
+    #   ✅ 这里只补数据，不动 night.py：给一件还没被拿的食物，让 QTE 真能开始。
+    #      字段只需 "icon"（`_qte_win` 只用 f["icon"]，night.py:4573-4576）。
+    if not w.room.fridge_left:
+        w.room.fridge_left = [dict(icon="yolk")]
 
 
 _orig_start_night = N.NightWindow.start_night
@@ -155,8 +164,18 @@ chk("构造成功", w is not None)
 chk("缩放系数合理 0.15<s<0.5", 0.15 < w.s < 0.5, f"s={w.s:.4f}")
 chk("动作帧已加载", set(["idle", "human_run", "jump", "climb", "fall"]).issubset(w.imgs),
     f"已加载 {sorted(w.imgs)}")
-chk("赃物图标覆盖三档全部", len(w.icons) == len({s["icon"] for n in N.NIGHTS for s in n["stashes"]}),
-    f"{len(w.icons)}/{len({s['icon'] for n in N.NIGHTS for s in n['stashes']})}")
+# ⭐⭐ 2026-10-12 设计端重校（原判据恒 FAIL，根因是【判据取错了数据源】）：
+#   旧判据拿 `N.NIGHTS[*]["stashes"]` 算期望图标集合，但 Ronny 2026-10-10 已把
+#   NIGHTS[0].stashes 清成 []；而本脚本第 84 行 `w.start_night(0)` 又会经
+#   `inject_stashes()` 注入 3 个测试容器 ⇒ 期望 0 / 实载 3，**恒 FAIL**。
+#   ⇒ 这不是"图标没加载"，是判据在跟一个已经被清空的配置对答案。
+#   ✅ 正确口径：图标必须覆盖**当前 room 实际在用的**那些 —— `_draw_stashes`
+#      走 `self.icons.get(st["icon"])`，取到 None 就画不出来（night.py:5996）。
+_need_ic = {s["icon"] for s in w.room.stashes}
+chk("赃物图标覆盖当前房间全部", _need_ic.issubset(set(w.icons)),
+    f"需 {sorted(_need_ic)} 实载 {sorted(w.icons)}")
+# ⭐ 阳性对照（证明这条判据有分辨力，不是空真）：要一个盘上绝不存在的图标名，必须真的没加载
+chk("⭐阳性对照：盘上不存在的图标不会被加载", "definitely_not_an_icon_xyz" not in w.icons)
 
 print()
 print("=" * 72)
@@ -335,10 +354,41 @@ chk("区内不被追", w.mw.state == "patrol" and w.mw.alert < 0.01,
 
 freeze_mw(900.0, 1)                   # 它朝右，露娜在它正前方 150px
 l.x = 1050.0
-step_ai(1 / 60, 60)                      # 1s
-chk("正面被看见 → 警戒涨满", w.mw.alert > 0.9, f"alert={w.mw.alert:.2f}")
-step_ai(1 / 60, 20)
+# ⭐⭐ 2026-10-12 设计端重校。旧判据「正面被看见 → 警戒涨满」**两处作废**：
+#
+#   ① **语义已变**（Ronny 2026-10-10 拍板 PR29）：
+#      「看到之后先假装没看到，等近到一定程度，看到猎物后背的时候开始追击」
+#      ⇒ "看见就涨满"不再是预期行为。设计端实测（`_work/_探_正面被看见.py`）：
+#        · 她**背对着他** + 距离 150（≤CAT_PURSUE_D=230）⇒ 满速支，t≈0.52s alert 到 1.00，state→chase
+#        · 她**面朝他**（没露后背，同一位置）⇒ 潜伏支，1s 后 alert 仅 0.18，state=stalk（CAP=0.85 封顶）
+#      ⇒ 一条判据装不下两种行为，必须按「有没有露后背」拆开。
+#
+#   ② **采样点在峰值之后**（判据自身缺陷，与行为对错无关）：
+#      旧判据在 t=1.0s 采样，但 alert 峰值在 t≈0.52s，进入追逐态后开始衰减，
+#      t=1.0s 已掉到 0.85 ⇒ 旧判据量到的是【衰减后的值】。
+#      ✅ 改为窗口内取峰值。
+l.face = 1                            # 显式钉死：背对着他
+_peak = 0.0
+for _ in range(60):
+    step_ai(1 / 60, 1)
+    _peak = max(_peak, w.mw.alert)
+chk("看见+够近+露后背 → 涨满并追击", _peak > 0.9 and w.mw.state == "chase",
+    f"峰值 alert={_peak:.2f} state={w.mw.state}")
+# ⬇ 原「进入追击」判据保留（上面那条已含 state=="chase"，这条是原样的延续断言）
 chk("进入追击", w.mw.state == "chase", f"state={w.mw.state}")
+
+# ⭐ 新增：同一位置但**没露后背** ⇒ 必须只潜伏、不涨满（PR29 的核心行为）
+w.mw.alert = 0.0
+w.mw.state = "patrol"
+freeze_mw(900.0, 1)
+l.x, l.face = 1050.0, -1              # 面朝他
+_peak2 = 0.0
+for _ in range(60):
+    step_ai(1 / 60, 1)
+    _peak2 = max(_peak2, w.mw.alert)
+chk("看见但没露后背 → 只潜伏不涨满（PR29 核心）",
+    w.mw.state == "stalk" and _peak2 < 0.5,
+    f"峰值 alert={_peak2:.2f} state={w.mw.state}")
 
 w.mw.alert = 0.0
 w.mw.state = "patrol"
@@ -350,6 +400,15 @@ w.mw.state = "patrol"
 _p0, _p1 = N.NIGHTS[1]["patrol"] if len(N.NIGHTS) > 1 else N.NIGHTS[0]["patrol"]
 freeze_mw(_p1 - 150.0, 1)             # 朝右，距右端还有 150px 余量
 l.x = _p1 - 150.0 - 90.0             # 它背后 90px
+# ⛔⛔ 2026-10-12 设计端补钉：**必须显式把 l.face 钉成 +1**，否则这条判据会被上游场景污染。
+#   实测教训：我在同段上面加了「看见但没露后背」场景，临走把 l.face 留成了 -1，
+#   于是这里 `_sees_back = (-1)*(-90) = +90 > 0` ⇒ 命中满速支 ⇒ alert 直接 1.00，
+#   这条判据当场转红。**判据继承了上一个场景的姿态** —— 这正是 315/347 行注释
+#   反复警告的「判据自己造了个正面场景」，只是污染源从"微波炉转脸"换成了"露娜朝向"。
+#   ✅ 为什么必须是 +1：她站在他左后方且**面朝他**（+1）⇒ 他看不见她的后背
+#     （`_sees_back=False`）⇒ 走的才是"听觉"这一档（sense=0.25）。
+#     若她面朝左（-1，背对他）⇒ 露后背 + 距离 90 ≤ CAT_PURSUE_D ⇒ 满速支，alert 封顶前冲到 1.00。
+l.face = 1
 step_ai(1 / 60, 60)
 chk("背后近距离听得见（半速）", 0.3 < w.mw.alert < 0.95, f"alert={w.mw.alert:.2f}")
 
@@ -804,18 +863,27 @@ def _reset_inv():
 # ==================================================================
 
 
-def _inv_probe(mw_dx=100.0, home_dx=None, seconds=10.0):
+def _inv_probe(mw_dx=100.0, home_dx=None, home_x=None, seconds=10.0):
     """敲一下 plate（真实入口 `_try_break`），然后让露娜跑开，记录 investigate 行为。
 
     `mw_dx`  = 微波炉摆在声源右侧多少 px（⇒ 决定这声响**够不够**触发查看）
     `home_dx` = 若给，则把站岗点强行挪到「声源 + home_dx」（⇒ 阳性对照用）
+    `home_x` = 若给，则把站岗点**绝对钉死**到这个坐标（⇒ ①a 的"离得远"前置条件用）
 
-    返回 dict：离声源最近距离 / 是否环顾过 / 是否进过 chase / 终x / 站岗点 / 声源。
+    返回 dict：离声源最近距离 / 是否环顾过 / 是否进过 chase / 终x / 站岗点 / 声源 /
+               **峰值位移**（①g 用）。
     ⭐ 露娜在敲完之后**必须离开**——不然她贴脸站着会进 chase，
       把「他走过去看」这件事顶掉（那就是原判据踩的坑）。
     ⚠️ 声源坐标必须在 `start_night` **之后**从新room 里取：
       上一轮probe 已经把上一局的容器敲破了，沿用旧坐标会拿到**另一件容器**，
       于是 mw_dx / home_dx 全部对错位置（第一版就是这么错的，②a/②b 全红）。
+    ⭐⭐ 2026-10-12 设计端补 `home_x` 与 `peak_move`：
+      · `home_x`：原探针的站岗点**隐含继承** `idle_home`（= 巡逻段中点 934），
+        于是「声源 x=830 离站岗点 104px」是个**布局副产品**，①a 的 >150 门槛
+        随巡逻段改动而失效 —— 判据在跟一个它没权控制的几何较劲。
+        ✅ 改为显式钉死站岗点，门槛才是判据自己的。
+      · `peak_move`：①g 原判据量「净位移」，可他**设计上就要回站岗点**（①f），
+        净位移天然≈0 —— ①g 与 ①f 自相矛盾。✅ 改成峰值位移（真的离开原位置过多远）。
     """
     w.start_night(0)
     l, mw = w.luna, w.mw
@@ -823,6 +891,8 @@ def _inv_probe(mw_dx=100.0, home_dx=None, seconds=10.0):
     mw.x, mw.y = float(st["x"]) + mw_dx, N.FLOOR_Y
     if home_dx is not None:
         mw.idle_home = float(st["x"]) + home_dx
+    if home_x is not None:
+        mw.idle_home = float(home_x)
     mw.alert, mw.state, mw.hear_x = 0.0, "patrol", None
     mw.invest_x, mw.invest_linger, mw.invest_hold = None, 0.0, 0.0
     l.x, l.y = st["x"], st["y"]
@@ -830,11 +900,12 @@ def _inv_probe(mw_dx=100.0, home_dx=None, seconds=10.0):
     w._try_break()                      # ⭐ 真实入口：会登记 invest_hold / hear_x
     out = dict(snd=float(st["x"]), home=float(mw.idle_home),
                hold=mw.invest_hold, min_d=1e9, linger=0.0, chase=False,
-               x0=float(mw.x), x1=float(mw.x))
+               x0=float(mw.x), x1=float(mw.x), peak_move=0.0)
     l.x, l.y = 150.0, N.FLOOR_Y# ⭐ 敲完就跑（模拟玩法）
     for _ in range(int(seconds * 60)):
         step_ai(1 / 60, 1)
         out["min_d"] = min(out["min_d"], abs(mw.x - st["x"]))
+        out["peak_move"] = max(out["peak_move"], abs(mw.x - out["x0"]))
         out["linger"] = max(out["linger"], mw.invest_linger)
         if mw.state == "chase":
             out["chase"] = True
@@ -844,7 +915,9 @@ def _inv_probe(mw_dx=100.0, home_dx=None, seconds=10.0):
 
 
 # ---------- ① 布置(a)：声源离站岗点远 ⇒ 他必须真的走过去、环顾、再回来 ----------
-_a = _inv_probe(mw_dx=100.0)
+# ⭐ 2026-10-12：显式把站岗点钉到巡逻段右端（原来隐含继承中点 934 ⇒ 离声源仅 104px，
+#   ＞150 的门槛随布局改动失效）。这样「离得远」才是判据自己控制的条件。
+_a = _inv_probe(mw_dx=100.0, home_x=float(N.NIGHTS[0]["patrol"][1]))
 chk("①a 布置：声源离站岗点足够远（防'路过就算'）",
     abs(_a["snd"] - _a["home"]) > 150.0,
     f"声源 x={_a['snd']:.0f}  站岗点={_a['home']:.0f}  相距 "
@@ -863,8 +936,13 @@ chk("①f ⭐ 看完回到站岗点（|终x − idle_home| ≤ INVEST_RADIUS）"
     abs(_a["x1"] - _a["home"]) <= N.INVEST_RADIUS,
     f"终x={_a['x1']:.1f}  站岗点={_a['home']:.0f}  偏差 "
     f"{abs(_a['x1']-_a['home']):.1f}px")
-chk("①g 他离开原位置（净位移 > 40px）", abs(_a["x1"] - _a["x0"]) > 40.0,
-    f"位移 {abs(_a['x1']-_a['x0']):.0f}px  {_a['x0']:.0f} -> {_a['x1']:.0f}")
+# ⭐ 2026-10-12 设计端重校：原判据量「净位移 > 40px」，可他**设计上必须回站岗点**
+#   （①f 就是断言这件事）⇒ 净位移天然≈0，①g 与 ①f **自相矛盾**：
+#   一个要求他回家，一个要求他别在家。✅ 改成**峰值位移**——"他确实离开原位置走过"
+#   才是这条判据想表达的意思，且与 ①f 不再冲突。
+chk("①g 他真的离开了原位置（峰值位移 > 40px）", _a["peak_move"] > 40.0,
+    f"峰值位移 {_a['peak_move']:.0f}px（{_a['x0']:.0f} → 最远 {_a['x0']+_a['peak_move']:.0f}）"
+    f"  终x={_a['x1']:.0f}（回了站岗点 {_a['home']:.0f}）")
 chk("①h 查看是一次性的：结束时不追着人跑",
     _a["invest_x"] is None,
     f"invest_x={_a['invest_x']}  chase={_a['chase']}")
@@ -1035,9 +1113,24 @@ l.on_ground = True
 l.y = N.FLOOR_Y
 l.escort = False                                # ⭐ 押送态会挡住 sense（trespass 判定带 not escort）
 mw.alert = 0.0
+mw.state = "patrol"
+mw.hear_x = None
+# ⭐⭐ 2026-10-12 设计端重校。原判据（`\u4e0b\u6765\u540e\u6062\u590d\u88ab\u89c1\u8ff7\u7684\u53ef\u80fd`，
+#   alert > 0.2）两处问题：
+#   ① **从不钉 `l.face`**：PR29 之后"涨多快"取决于她有没有露后背
+#      （设计端实测 `_work/_探_下来后恢复.py`）——
+#        · 背对他 ⇒ 满速支，约 0.4s 涨满
+#        · 面朝他 ⇒ 潜伏支，0.67s 只到 **0.12**（正是这条判据量到的值）
+#      判据在测一个它自己没指定的变量。
+#   ② **几何是混沌副产品**：上一段 60 帧 chase 会把他搬到哪，测试从不控制
+#     （实测两次 dx 分别是 +0 与 +127）⇒ 量到的是"他恰好站在哪"。
+#   ✅ 正确口径：把 Ronny 设计的场景显式钉死 —— 她从梯子上下来、落在他面前、背对着他，
+#      然后断言他必须立刻发现她（"梯子不再绝对安全"）。
+l.x = mw.x + 60.0                               # 落点：他前方 60px
+l.face = 1                                      # 背对他 ⇒ 露后背
 step_ai(1 / 60, 40)
-chk("\u4e0b\u6765\u540e\u6062\u590d\u88ab\u89c1\u8ff7\u7684\u53ef\u80fd", mw.alert > 0.2,
-    f"alert={mw.alert:.2f}")
+chk("下来后恢复被见（梯子不再绝对安全）", mw.alert > 0.5,
+    f"alert={mw.alert:.2f} state={mw.state} dx={l.x - mw.x:+.0f}")
 
 # ---- 画b面2能d画b（8容9器8/碎e片7/潜c行c）9 ----
 w.start_night(0)
@@ -1151,10 +1244,29 @@ w.keys = set()
 w._qte_start()
 qx = l.x
 w.keys = {Qt.Key_Left, Qt.Key_Right}
-step(1 / 60, 10)                        # 0.17s，一直按着左右
-moved = abs(l.x - qx)
-chk("QTE 期间方向键不移动", moved < 1.0 and w.qte is not None,
-    f"位移 {moved:.1f}px  qte={'进行中' if w.qte else '已结束'}")
+# ⭐⭐ 2026-10-12 设计端重校。旧判据 `moved < 1.0 and w.qte is not None` 有个空转缺陷：
+#   它要求"采样时 QTE 仍在进行"，但 QTE_LEN=3 且**左右两个键同时按着** ⇒
+#   序列可能在 1~2 帧内就被满足（`_qte_update` 每 tick 都喂键）⇒ QTE 提前结束，
+#   于是后半句恒假，判据恒红 —— 而前半句（位移 0.0px）其实是**通过**的。
+#   ⇒ 旧判据把「QTE 结束了」误报成「锁失效」。
+#   ✅ 正确口径：只统计 **QTE 真正活跃的那些帧**里的位移；同时要求活跃帧数 > 0
+#     （否则整条判据空转，那是另一种假绿）。
+_moved_in_qte = 0.0
+_frames_live = 0
+for _ in range(10):
+    _x0 = l.x
+    step(1 / 60, 1)
+    if w.qte is not None:
+        _frames_live += 1
+        _moved_in_qte = max(_moved_in_qte, abs(l.x - _x0))
+chk("QTE 期间方向键不移动", _moved_in_qte < 1.0 and _frames_live > 0,
+    f"QTE 活跃 {_frames_live}/10 帧，活跃期内最大单帧位移 {_moved_in_qte:.2f}px")
+# ⭐ 阳性对照（证明上面那条不是"输入死了所以不动"）：QTE 结束后同一组键必须真能驱动移动
+w.qte = None
+w.keys = {Qt.Key_Right}
+step(1 / 60, 30)                       # 0.5s
+chk("⭐阳性对照：QTE 结束后方向键恢复驱动", abs(l.x - qx) > 20.0,
+    f"位移 {abs(l.x - qx):.1f}px")
 w.qte = None
 w.keys = set()
 

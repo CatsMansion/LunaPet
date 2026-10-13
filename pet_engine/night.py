@@ -1145,8 +1145,8 @@ MW_CATCH_R  = 52.0          # 抓捕半径（不分档 —— 这是"被抓住�
 #   ⛔ 这三个常量只作用于 Microwave.update 的 `s >= 1.0` 那一支和 _patrol 的 stalk 段。
 CAT_STALK_GAIN  = 0.18    # 潜伏期 alert 增速（原 alert_gain=2.5 ⇒ 慢约 14 倍）。
                           #   ⛔ 想退回「看见就立刻满速涨」：把 update 里 CAT_STALK_GAIN 改成 self.alert_gain
-CAT_STALK_SPEED = 26.0    # 潜伏期匍匐接近速度（远低于追击 282 与链表 patrol_speed 120）。
-                          #   ⛔ 想退回「纯站岗（一点都不平移）」：把这里改 0.0，一行回退
+CAT_STALK_CAP   = 0.85    # 潜伏期 alert 上限（不许涨到 1.0）
+CAT_STALK_SPEED = 0.0     # 改非 0 前必须先解决「离岗后怎么回岗」
 CAT_PURSUE_D    = 230.0   # 近到这个距离以内，且看到她的后背 ⇒ 满速涨 + 进 chase。
                           #   ⛔ 想退回「看到就追」：把这个改成一个很大的数（如 99999）
 # ⭐ "真的看见"的门槛（team-lead 2026-10-11 裁定 A）：sense() 正面锥实测返回 **0.75~1.0**
@@ -1272,7 +1272,8 @@ GAME_ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 #     **已删除** —— 留着会误导下一个读代码的人去给桌宠动作调 fps。
 #   ⭐ attack / attack_charge 都是 24.0 = 16 帧 / 0.667s，与 run_carry 同节奏。
 GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0,
-            "attack": 24.0, "attack_charge": 24.0}
+            "attack": 24.0, "attack_charge": 24.0,
+            "mw_idle": 8.0}      # ⭐ PR31-A：patrol 原地警戒，裁定 §6 定 8fps
 # ⭐ 素材的**原始朝向**（+1 朝右 / -1 朝左），实测自素材本身，不是猜的：
 #   mw_walk 素材朝左（能看到侧脸和制服前襟，尾巴在右后）→ -1
 #   run_carry 素材朝右（脸朝右，鱼在右边的嘴里）    → +1
@@ -1280,7 +1281,8 @@ GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0,
 # ⛔ 之前写 `if face < 0: mirror` —— 那只在"素材朝右"时才碰巧正确。
 #   微波炉素材朝左，所以它 face=1（该朝右）时**没被镜像**，等于拿屁股对着玩家（Ronny 实机反馈）。
 #   ✅ 改成"和素材原始朝向不一致才镜像"，两套素材共用一条规则。
-GAME_SRC_FACE = {"mw_walk": -1, "run_carry": 1, "attack": 1, "attack_charge": 1}
+GAME_SRC_FACE = {"mw_walk": -1, "run_carry": 1, "attack": 1, "attack_charge": 1,
+                 "mw_idle": -1}  # ⭐ PR31-A：假设同 mw_walk 朝左；待目视确认
 
 # ============================================================================
 # ①之二、三档夜晚（2026-10-03）
@@ -2273,7 +2275,11 @@ class Microwave:
             if abs(luna.x - self.x) <= CAT_PURSUE_D and self._sees_back(luna):
                 self.alert = min(1.0, self.alert + self.alert_gain * dt)
             else:
-                self.alert = min(1.0, self.alert + CAT_STALK_GAIN * dt)
+                # ⛔ 潜伏期只涨到 CAT_STALK_CAP 就停住 —— 不许自己涨到 1.0，
+                #    否则「够近才扑」这道门会被 alert 自然涨满绕过。
+                #   ⭐ 2026-10-12 team-lead 裁定接线（派单附录 A 原写「补两行就停手」
+                #     是表述不严谨；PR29b【D】的本意是让上限生效，不是只定义）。
+                self.alert = min(CAT_STALK_CAP, self.alert + CAT_STALK_GAIN * dt)
         elif s > 0.0:
             # ⚠️⚠️ 2026-10-06 实测澄清（**不是 bug，是设计现状，别"顺手修"**）：
             #   这一支的涨速恒为 `alert_hear`，**没有乘 `sense`**。
@@ -2942,6 +2948,13 @@ class NightWindow(QWidget):
         self._break_fx = []          # 容器碎裂特效 [[x, y, t], ...]
         self.noise_flash = 0.0       # 噪音闪烁倒计时
         self.mw_t = 0.0              # 微波炉动画计时（步频按速度重映射）
+        # ⭐⭐ PR33（2026-10-13 设计端裁定）：`mw_idle` 的**独立帧时钟**。
+        #   ⛔ 为什么要有第二个：`mw_t` 是按位移速度重映射的（静止 0.4× / 全速 2.6×），
+        #     而 patrol 态他**站着不动**（`_patrol` 里 ⛔ 不许平移）⇒ `_sm` 恒 0
+        #     ⇒ `mw_idle` 永远吃 0.4× ⇒ 名义 8fps 实际只有 3.2fps（12 帧跑 3.75 秒）。
+        #     idle 是"站着呼吸"，它跟位移无关，不该被速度阻尼。
+        #   ⛔ 只服务 `mw_idle`；`mw_walk` 必须继续吃 `mw_t`（走路要和脚下的位移同步）。
+        self.mw_idle_t = 0.0         # ⛔ 无条件 1.0× 累加，不吃 0.4 也不吃 2.6
         self._mw_px = self.mw.x      # 上一帧的 x（用来差分算速度，Microwave 没有 vx）
         self._mw_sm = 0.0            # ⭐ 平滑后的速度（供步频计算，避免抽搐）
         self._was_over = False       # 越界旁白只在她【跨过去那一下】说
@@ -4840,6 +4853,11 @@ class NightWindow(QWidget):
         self._mw_sm += (_mwv - self._mw_sm) * min(1.0, dt * 6.0)
         _sm = self._mw_sm
         self.mw_t += dt * (min(_sm / 95.0, 2.6) if _sm > 1.0 else 0.4)
+        # ⭐⭐ PR33：`mw_idle` 的独立时钟。**1.0×，不受上面那条重映射影响**。
+        #   ⛔ 不许改成抵消极性（改 GAME_FPS["mw_idle"] 去凑）⇒ 那会污染键语义：
+        #      该键将来要被美术端/装机工具当**真实帧率**读。
+        #   💡 回退：Ronny 嫌 1.5s 一轮太快/太慢 ⇒ 只改这一行的系数（如 dt*0.6 ⇒ 4.8fps）。
+        self.mw_idle_t += dt
         # ⭐ 冰箱 QTE 计时：⛔ 游戏**不暂停**，微波炉还在追（这才叫 QTE）
         if self.qte is not None and self.phase == "play":
             self.qte["t"] += dt
@@ -6153,13 +6171,19 @@ class NightWindow(QWidget):
                            QPointF(fx, y + 30), QPointF(x, y - 20)])
 
         # ⭐ 本体：优先用真帧（派单 35 单 C），缺帧时退回灰盒方块
-        _mf = self.gframes.get("mw_walk") or []
+        # ⭐ PR31-A：patrol 状态播 mw_idle，其余状态回落 mw_walk
+        _mw_key = "mw_idle" if m.state == "patrol" else "mw_walk"
+        _mf = self.gframes.get(_mw_key) or self.gframes.get("mw_walk") or []
         if _mf:
-            _k = int(self.mw_t * GAME_FPS["mw_walk"]) % len(_mf)
+            _fps = GAME_FPS.get(_mw_key, GAME_FPS["mw_walk"])
+            # ⭐⭐ PR33：`mw_idle` 走独立时钟（1.0×，8fps ⇒ 12 帧 1.5 秒一轮），
+            #   其余序列（现在只有 mw_walk）**照旧**吃 `mw_t`——走路必须跟脚下位移同步。
+            _clk = self.mw_idle_t if _mw_key == "mw_idle" else self.mw_t
+            _k = int(_clk * _fps) % len(_mf)
             _pm, _cw, _ch, _ax, _ay = _mf[_k]
             p.save()
             p.translate(x, y)
-            if m.face != GAME_SRC_FACE["mw_walk"]:
+            if m.face != GAME_SRC_FACE.get(_mw_key, GAME_SRC_FACE["mw_walk"]):
                 p.scale(-1.0, 1.0)
             p.drawImage(QRectF(-_ax, -_ay, _cw, _ch), _pm, QRectF(0, 0, _cw, _ch))
             p.restore()
