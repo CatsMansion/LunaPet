@@ -1254,7 +1254,7 @@ INVEST_HOLD    = 0.60# 触发记忆维持秒数（够他反应过来迈腿，又
 #      `NEED_ACTIONS` 只喂 `_load_needed(pack, ...)`，那是**桌宠 packs**。
 #      加进来 = 桌宠包里找不到它 = 又一次静默兜底画idle。
 NEED_ACTIONS = ["idle", "walk", "human_run", "jump", "fall", "climb", "land",
-                "sneak"]
+                "sneak", "drag"]          # ⭐ PR37：被拎起来走 drag 素材（同 sneak 当初补法）
 
 # ---- 游戏专用素材（2026-10-03 派单 35 回传）----
 # ⭐ 放在 自研引擎/assets_game/，不进 packs/ —— 微波炉不是桌宠角色，不该进桌宠包。
@@ -1283,6 +1283,22 @@ GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0,
 #   ✅ 改成"和素材原始朝向不一致才镜像"，两套素材共用一条规则。
 GAME_SRC_FACE = {"mw_walk": -1, "run_carry": 1, "attack": 1, "attack_charge": 1,
                  "mw_idle": -1}  # ⭐ PR31-A：假设同 mw_walk 朝左；待目视确认
+
+# ⭐⭐ PR36：桌宠 pack 分支的源朝向表（设计端 2026-10-13 纯目视实测 25 动作）。
+#   结论：全 pack 无一个动作源素材朝左。
+#     · +1 = 侧面朝右（5 个）：镜像=转身，必须跟 face
+#     ·  0 = 正面朝观众（20 个）：镜像只会把尾巴/呆毛搬到另一侧，⛔ 永不镜像
+#   ⛔ 表内容不许自行改动；要改先回报设计端（附目视证据）。
+PACK_SRC_FACE = {
+    # 侧面朝右
+    "walk": 1, "climb": 1, "gorilla_run": 1, "human_run": 1, "sneak": 1,
+    # 正面朝观众（0 = 不镜像）
+    "idle": 0, "drag": 0, "fall": 0, "land": 0, "pat": 0,
+    "sleep_in": 0, "sleep_out": 0, "land_settle": 0, "sleep_loop": 0,
+    "turn_in": 0, "turn_out": 0, "stretch": 0, "drag_in": 0, "drag_out": 0,
+    "tease": 0, "eat": 0, "jump": 0, "jump_excited": 0, "brush": 0,
+    "gamepad": 0,
+}
 
 # ============================================================================
 # ①之二、三档夜晚（2026-10-03）
@@ -1954,6 +1970,8 @@ class Luna:
         #     蓄力时看到拉弓、命中时看到出招，**视觉上正好对应蓄力机制**。
         #⛔ 别把 punch 顶起来当蓄力计时（punch 是"已出招"的计时，
         #     拿它当蓄力指示会让出招时机算错—— PR14 已踩过这个坑）。
+        if self.escort:                   # ⭐ PR37：被押送全程播 drag（meowed+hauled）
+            return "drag"
         if self.charging:
             return "attack_charge"
         # ⭐ 挥击优先（Ronny 10-03 反馈「露娜还是不会攻击」）：
@@ -4220,6 +4238,12 @@ class NightWindow(QWidget):
         #     由窗口注入一个回调，物理层只在正确的那一帧喊一声。
         self.luna.on_land = self._on_luna_land
         self.mw = Microwave(cfg, patrol=self.room.mw_patrol)
+        # ⭐⭐ PR31-D：开局把速度差分的基准同步到新微波炉位置。
+        #   ⛔ 不补这两行 ⇒ 第一帧拿上一档遗留位置做差分 ⇒ 速度尖峰 ⇒ 头 ~0.5s 步频偏快。
+        #   ⛔ 只同步基准，⛔ 不重置 mw_t / mw_idle_t —— 那俩被 `% len(frames)` 消费，
+        #      继续累加只是动画接着走，不是 bug。
+        self._mw_px = self.mw.x
+        self._mw_sm = 0.0
         self.phase = "play"
         self.phase_t = 0.0
         self.haul_t = 0.0
@@ -4932,6 +4956,7 @@ class NightWindow(QWidget):
                 self._narrate("drop")
             elif mw.caught(l) and l.x > self.room.border_x:
                 self.phase = "meowed"
+                l.escort = True            # ⭐ PR37：激活孤儿标志，使状态机自驱 drag（:5000 的 False 为真出口）
                 self.phase_t = 0.0
                 self.caught_cnt += 1
                 self.qte = None             # ⭐ 被抓时 QTE 必须作废（否则按键还在喂一个死 QTE）
@@ -6172,7 +6197,15 @@ class NightWindow(QWidget):
 
         # ⭐ 本体：优先用真帧（派单 35 单 C），缺帧时退回灰盒方块
         # ⭐ PR31-A：patrol 状态播 mw_idle，其余状态回落 mw_walk
-        _mw_key = "mw_idle" if m.state == "patrol" else "mw_walk"
+        # ⭐⭐ PR31-D：investigate 期间他在以 INVEST_SPEED=165px/s 真实位移，
+        #   但 state 仍是 "patrol"（`_investigate` 全程不写 self.state）⇒ 会落到
+        #   mw_idle（站桩）⇒ 165px/s 配 8fps 站桩 = 滑行。
+        #   ⛔ 不改 self.state（自测里大量判据按 state 断言，动它踩一大片）；
+        #   ✅ 只在渲染侧取键时排除 ⇒ 这段回落 mw_walk（走路要和脚下位移同步）。
+        #   ⚠️ 同类但**本单不修**：stun 击退那 0.45 秒（self.x += knock_vx*dt）也是
+        #      state=patrol + 位移 + 播 idle，设计端已知，别顺手改。
+        _mw_investigating = getattr(m, "invest_x", None) is not None
+        _mw_key = "mw_idle" if (m.state == "patrol" and not _mw_investigating) else "mw_walk"
         _mf = self.gframes.get(_mw_key) or self.gframes.get("mw_walk") or []
         if _mf:
             _fps = GAME_FPS.get(_mw_key, GAME_FPS["mw_walk"])
@@ -6342,7 +6375,14 @@ class NightWindow(QWidget):
         if l.act == "run_carry":
             _rf = self.gframes.get("run_carry") or []
             if _rf:
-                _k = int(l.t * GAME_FPS["run_carry"]) % len(_rf)
+                _k = int(l.t) % len(_rf)          # ⭐ PR39：去掉双乘（与 pack 分支 `int(l.t)` 一致）
+                # ⛔⛔ 原来是 `int(l.t * GAME_FPS["run_carry"])` —— 而 `l.t` 在
+                #   `_tick` 里已是【帧单位】（`l.t += dt * fps`）⇒ fps 被乘了两次
+                #   ⇒ 实际速率 24×24=576 步/秒 = 32 轮/秒（18 帧）⇒ 无影手级频闪。
+                #   实测（2026-10-14 探针 `_pr39_probe.py`，30 帧窗口）：
+                #     改前帧序列 9 0 10 2 11 3 12 4 14 5 …（相邻跳变 8~10 = 频闪）；
+                #     改后帧序列 0 0 1 1 1 2 2 3 3 3 4 4 …（相邻跳变 ≤1，每索引驻留 2~3 帧 = 24fps）。
+                #   ⛔ 别改 GAME_FPS["run_carry"]（仍是 24.0，设计意图）—— bug 在公式。
                 _pm, _cw, _ch, _ax, _ay = _rf[_k]
                 p.save()
                 p.translate(l.x, l.y)
@@ -6404,7 +6444,14 @@ class NightWindow(QWidget):
 
         p.save()
         p.translate(l.x, l.y)
-        if l.face < 0:
+        # ⭐⭐ PR36：与两个游戏帧分支（run_carry / attack）同一套规则 ——
+        #   「与素材源朝向不一致才镜像」，⛔ 不再是「face<0 就镜像」。
+        #   · 侧面动作（walk/climb/gorilla_run/human_run/sneak，源朝右）：face=-1 时镜像=转身 ✅
+        #   · 正面动作（20 个，源朝向 0）：⛔ 永不镜像 —— 镜像只会把尾巴/呆毛
+        #     搬到另一侧，正是 Ronny 反馈「下落方向反了」的观感来源。
+        #   根因链：night.py:1699-1702 空中也改 face ⇒ face 变号 ⇒ 正面素材被镜像。
+        _psf = PACK_SRC_FACE.get(l.act, 1)
+        if _psf != 0 and l.face != _psf:
             p.scale(-1.0, 1.0)
         p.drawImage(QRectF(-ax * s, -ay * s, cw * s, ch * s),
                     im, QRectF(0, 0, cw, ch))

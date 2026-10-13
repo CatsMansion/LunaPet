@@ -1989,7 +1989,15 @@ except Exception as _e:                        # noqa: BLE001
 chk("⑳-5 ⭐⭐ C5 编辑态 cam_x = 0 / 1280 / 2560 三档强制 render 通过", _pok5,
     _perr5 if _perr5 else "render OK")
 
-# ---- ⛔ 禁碰核对：`_draw_bg` 函数体**逐字节未变**（对比 PR16 基线副本）----
+# ---- ⛔ 禁碰核对：`_draw_bg` 函数体**逐字节未变**（对比基线副本）----
+# ⭐ PR34（2026-10-13 设计端派单）：基线副本由 PR16 版更新为 PR-30 后版本。
+#   · 旧副本 `night.py.5675lines.1c3887fb`（2026-10-10 08:00）**保留未删**，留痕。
+#   · 新副本 `night.py.6510lines.3a97d6e9`（2026-10-13，= PR33 完工时的 night.py）。
+#   · 为什么必须换：PR-30 白天档给 `_draw_bg` 加了 `if self._day:` 早退分支
+#     （实质绘制代码，night.py:5648 起），基线跟 PR16 不符是必然的。
+#     不换 ⇒ 这条判据永远红 ⇒ 红到所有人习惯性无视 ⇒ 判据死亡。
+#   ⛔ 本判据的**逻辑（比对 md5）一个字符没动** —— 它继续守护 `_draw_bg`：
+#     将来谁要再动它，仍旧红灯报警、仍旧要先过设计端。
 def _func_src(text, name):
     i = text.index("    def %s(self" % name)
     j = text.find("\n    def ", i + 10)
@@ -1998,17 +2006,19 @@ def _func_src(text, name):
 
 try:
     _base_txt = open(os.path.join(os.path.dirname(HERE), "_work",
-                                   "_baseline_PR16",
-                                   "night.py.5675lines.1c3887fb"),
+                                  "_baseline_PR16",
+                                  "night.py.6510lines.3a97d6e9"),
                      encoding="utf-8").read()
     _h_now = hashlib.md5(_func_src(_src20, "_draw_bg").encode("utf-8")).hexdigest()
     _h_base = hashlib.md5(_func_src(_base_txt, "_draw_bg").encode("utf-8")).hexdigest()
     _ok_20_8 = (_h_now == _h_base)
-    chk("⑳-8 ⭐⭐ 禁碰核对：`_draw_bg` 函数体 md5 与 PR16 基线**逐字节相同**"
-        "（派单 §6）", _ok_20_8,
+    chk("⑳-8 ⭐⭐ 禁碰核对：`_draw_bg` 函数体 md5 与基线相同"
+        "（基线 2026-10-13 由 PR16 更新至 PR-30 后版本；PR-30 白天档改动见 night.py:5644）",
+        _ok_20_8,
         "现在=%s 基线=%s" % (_h_now[:12], _h_base[:12]))
 except (OSError, ValueError) as _e:
-    chk("⑳-8 ⭐⭐ 禁碰核对：`_draw_bg` 函数体 md5 与 PR16 基线逐字节相同",
+    chk("⑳-8 ⭐⭐ 禁碰核对：`_draw_bg` 函数体 md5 与基线相同"
+        "（基线 2026-10-13 由 PR16 更新至 PR-30 后版本）",
          False, "基线读不到：%s" % _e)
 
 

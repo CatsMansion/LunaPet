@@ -108,6 +108,15 @@ def step_pure(dt=1.0 / 60.0, n=1):
     为什么需要：梯子在 x=700，已经在允许区外（BORDER_X=430），测爬梯时露娜必然越界，
     微波炉会真的追过来把她抓住 → phase 变 meowed → _tick 不再更新物理 →
     她卡在半空（实测 y=593 不动）。这是【测试污染】，不是物理 bug。
+
+    ⭐⭐ PR37-v2（2026-10-14）：本夹具把 phase 强拉回 "play" 时**必须一起清 `l.escort`**。
+      因为 PR37-v2 让 escort 变成**活标志**（抓捕时置 True，`Luna.update` 开头
+      `if self.escort: return` 会早退 ⇒ 物理全停）。只复位 phase 不清 escort ⇒
+      一旦本夹具窗口内发生过抓捕，escort 就**永久卡 True**，后面所有物理判据静默烂掉
+      （实测：③ 跑动 dx 只有 84px、跳高 0px、爬梯不动、alert 恒 0，共 15 条红）。
+      ⛔ 真机没有这条泄漏路径：`start_night` 重建 Luna（night.py:4234）、
+        hauled 结束清 escort（:5006）⇒ 这里补的是**夹具**与真机状态机的缺口，
+        ⛔ 不是改判据（本文件 :1100/:1114 早有同款 `l.escort = False` 防护）。
     """
     for _ in range(n):
         sx, sy = w.mw.x, w.mw.y
@@ -115,6 +124,7 @@ def step_pure(dt=1.0 / 60.0, n=1):
         w._tick()
         if w.phase != "play":
             w.phase, w.phase_t = "play", 0.0
+            w.luna.escort = False      # ⭐ PR37-v2：镜像真机 hauled→play 的 escort 清零
         w.mw.x, w.mw.y = sx, sy
         w.mw.alert, w.mw.state = 0.0, "patrol"
 
@@ -125,12 +135,16 @@ def step_ai(dt=1.0 / 60.0, n=1):
     ⛔ 踩过的坑：正面视野那组跑完 60 帧后微波炉已经追上并把露娜抓了，
        phase 变 meowed/hauled → _tick 里不再 update → 后面三组 alert 全是 0，
        但"进入追击"这种只看 state 的断言照样过，假绿。
+
+    ⭐⭐ PR37-v2（2026-10-14）：同 `step_pure`——强拉 phase 回 "play" 时一起清 escort
+      （escort 卡 True 会让 `Luna.update` 早退 + `trespass` 判定恒 False ⇒ 索敌全废）。
     """
     for _ in range(n):
         _T[0] += dt
         w._tick()
         if w.phase != "play":
             w.phase, w.phase_t = "play", 0.0
+            w.luna.escort = False      # ⭐ PR37-v2：镜像真机 hauled→play 的 escort 清零
 
 
 def render():
@@ -1322,3 +1336,649 @@ chk("\u722c\u68af\u80fd\u529b\uff1a\u4f1a\u8d70\u5230\u68af\u5b50\u5e76\u722c\u4
 # 爬c梯f不d可f能d越a过7台0面2底5（8不d会a穿f墙9）9
 mw.y = min(mw.y, 468.0)
 chk("\u722c\u68af\u4e0d\u4f1a\u7a7f\u8fc7\u53f0\u9762\u9876", mw.y >= 468.0, f"mw.y={mw.y:.0f}")
+
+
+# ============================================================================
+# ㉕ · PR31-D（2026-10-13 设计端派单）investigate 走路动画 + 开局速度尖峰
+# ============================================================================
+# ⭐ 本段两条判据（㉕-1/2、㉕-3/4）都是**新增**，⛔ 没有改动本文件里任何既有判据。
+# ⭐ 帧序一律用【真实】`w._draw_mw()` 取：只把 `QPainter.drawImage` 换成记录器，
+#   ⛔ 不替换被测函数、⛔ 不复刻一份取键逻辑。
+# ⭐ 全程驱动真 `w._tick()`（本文件既有纪律 ①）。
+
+
+def _mw_drawn_key():
+    """真跑 `_draw_mw`，返回它这一帧实际画的键名（mw_idle / mw_walk / None）。
+
+    None = 压根没画真帧（走了 `_draw_mw_box` 灰盒兜底）。
+    ⛔ 按 QImage **对象身份**认定，不看尺寸/内容 ——
+       mw_idle canvas 84x217 / mw_walk 86x217，只差 2px，看尺寸会认错。
+    """
+    from PySide6.QtGui import QImage, QPainter
+    canvas = QImage(64, 64, QImage.Format_ARGB32)
+    p = QPainter(canvas)
+    seen = []
+    _orig_di = QPainter.drawImage
+
+    def _spy(_self, *a):
+        seen.append(a)
+
+    QPainter.drawImage = _spy
+    try:
+        w._draw_mw(p)
+    finally:
+        QPainter.drawImage = _orig_di
+    p.end()
+    pm = None
+    for a in seen:
+        for it in a:
+            if isinstance(it, QImage):
+                pm = it
+                break
+        if pm is not None:
+            break
+    if pm is None:
+        return None
+    for k in ("mw_idle", "mw_walk"):
+        for row in (w.gframes.get(k) or []):
+            if row[0] is pm:
+                return k
+    return None
+
+
+print("㉕ PR31-D · investigate 走路动画 / 开局速度尖峰")
+print("=" * 72)
+
+# ⭐⭐ 时钟复位（本段专属，⛔ 不动 :1278 那行既有代码）：
+#   本文件 :1278（总结尾）把 perf_counter 还原成了真时钟；:1281 之后的既有段
+#   全部直调 `mw._chase(1/60, ...)`、不走的 `_tick` ⇒ 对还原免疫。
+#   但本段要驱动真 `w._tick()`（纪律①）⇒ 必须把假时钟装回来。
+#   ⛔ 同时必须把 `w._last` 打回 None：它在真时钟下留着真实时间戳（亿级），
+#      装回假时钟后 `now - _last` = 假值(几百) - 真戳(亿级) = 大负数
+#      ⇒ `min(0.033, 负)` = 负 dt ⇒ 物理倒退。
+#      实测病征（2026-10-13，复位前）：30 帧只走 5.6px、night_t 冻结在 0.03、
+#      invest_hold 30 帧只掉 0.001 —— 全部因为 dt 退化成了微秒级。
+time.perf_counter = lambda: _T[0]
+w._last = None
+
+
+def _mw_setup_investigate():
+    """把微波炉摆进「走过去查看声源」的前置状态（⛔ 不手动设 invest_x）。
+
+    invest_x 由 `Microwave.update` 自己建（night.py:2344 附近），
+    ⛔ 不由测试代劳 —— 否则测的就是测试自己造的状态，不是游戏行为。
+    """
+    w.mode = "play"
+    w.phase = "play"
+    w.mw.state = "patrol"
+    w.mw.alert = 0.0
+    w.mw.invest_x = None
+    w.mw.invest_linger = 0.0
+    w.mw.invest_hold = 2.0
+    # ⛔ 声源放他**右边**：放左边他会一路走到窝里把露娜抓住 ⇒ 进押送演出
+    #    （`mw.x = l.x + 34.0` 接管位置）⇒ 这段就不是"查看"了（PR33 探针实测踩过）。
+    w.mw.hear_x = float(w.mw.x) + 500.0
+    # 露娜回窝 ⇒ 不越界 ⇒ trespass=False ⇒ 他不会转 chase
+    w.luna.x = float(w.room.spawn_luna[0])
+    w.luna.y = float(N.FLOOR_Y)
+
+
+# ---- 判据 A：investigate 期间必须播 mw_walk ----
+w.start_night(0)
+_x0 = float(w.mw.x)
+_mw_setup_investigate()
+step(1 / 60, 30)                       # 真 _tick：invest_x 应被建立、他应真的在走
+_dx = float(w.mw.x) - _x0
+_k_inv = _mw_drawn_key()
+chk("㉕-1 ⭐⭐⭐ PR31-D 判据A：investigate 期间（invest_x 非 None 且真位移）"
+    " 必须播 mw_walk，不许播 mw_idle（165px/s 配 8fps 站桩 = 滑行）",
+    w.mw.invest_x is not None and _dx > 30.0 and _k_inv == "mw_walk",
+    f"invest_x={w.mw.invest_x:.0f} 位移={_dx:+.1f}px 实际画的键={_k_inv}")
+
+# ---- 判据 A 的阳性对照：同一套 setup，只把"查看触发"关掉 ⇒ 必须回到 mw_idle ----
+# ⛔ 若不设这条，㉕-1 可能因为"mw_idle/mw_walk 压根分不清"而假绿。
+# ⭐ 与 ㉕-1 的**唯一**差别是 invest_hold=0 / hear_x=None（触发关掉）；
+#    并断言整个窗口内 invest_x 始终为 None、且零位移 ⇒ 证明对照组真的是"站着巡逻"。
+w.start_night(0)
+_x0 = float(w.mw.x)
+_mw_setup_investigate()
+w.mw.invest_hold = 0.0
+w.mw.hear_x = None
+w.mw.invest_x = None
+step(1 / 60, 30)
+_dx_c = float(w.mw.x) - _x0
+_k_ctl = _mw_drawn_key()
+chk("㉕-2 ⭐⭐ 判据A 阳性对照：同一套 setup 但关掉查看触发（invest_x 恒 None、"
+    "零位移、state=patrol）⇒ 必须播 mw_idle（证明判据分得清这两者）",
+    w.mw.invest_x is None and abs(_dx_c) < 1e-9
+    and w.mw.state == "patrol" and _k_ctl == "mw_idle",
+    f"invest_x={w.mw.invest_x} 位移={_dx_c:+.1f}px state={w.mw.state} 实际画的键={_k_ctl}")
+
+# ---- 判据 B：开局无速度尖峰 ----
+w.start_night(0)
+_px_imm = float(w._mw_px)
+_sm_imm = float(w._mw_sm)
+step(1 / 60, 1)                        # 首帧：差分基准若没同步，这里就会炸
+_sm_1f = float(w._mw_sm)
+chk("㉕-3 ⭐⭐⭐ PR31-D 判据B：start_night 后 `_mw_px` 已同步到新微波炉、"
+    "首帧 `_mw_sm` ≤ 5.0（改前这里会拿上一档遗留位置做差分 ⇒ 尖峰 ⇒ 头 ~0.5s 步频偏快）",
+    abs(_px_imm - float(w.mw.x)) < 1e-9 and _sm_imm <= 5.0 and _sm_1f <= 5.0,
+    f"_mw_px-mw.x={_px_imm - float(w.mw.x):+.4f}  "
+    f"_mw_sm 立刻={_sm_imm:.4f} 首帧后={_sm_1f:.4f}（阈值 5.0）")
+
+# ---- 判据 B 的阳性对照：把 _mw_px 戳成离谱旧值 ⇒ 必须造出尖峰 ----
+# ⛔ 造不出尖峰 ⇒ 说明这条判据根本没在测"速度差分"这个东西。
+w.start_night(0)
+w._mw_px = float(w.mw.x) - 3000.0
+w._mw_sm = 0.0
+step(1 / 60, 1)
+_sm_spike = float(w._mw_sm)
+chk("㉕-4 ⭐⭐ 判据B 阳性对照：`_mw_px` 戳成 3000px 旧值 ⇒ 首帧必须造出 > 5.0 的尖峰",
+    _sm_spike > 5.0,
+    f"_mw_sm={_sm_spike:.1f}（阈值 5.0）⇒ 判据对速度差分有分辨力")
+
+print("=" * 72)
+print(f"㉕ PR31-D 段完成：本段 4 条（含 2 条阳性对照）")
+print("=" * 72)
+
+
+# ============================================================================
+# ㉖ · PR36（2026-10-14 设计端派单）桌宠 pack 分支镜像规则修正
+# ============================================================================
+# ⭐ 病灶：pack 分支原来写 `if l.face < 0: mirror`（假设所有素材朝右）。
+#   而 night.py:1716-1718 空中按左右键也会改 face ⇒ 20 个**正面**动作
+#   （fall/jump/idle…）在 face 变号时被镜像，尾巴/呆毛跳到另一侧
+#   = Ronny 反馈「下落时人物方向反了」。
+# ⭐ 修法：与两个游戏帧分支同一套规则 —— 「与素材源朝向（PACK_SRC_FACE）不一致才镜像」。
+# ⭐⭐ 时钟复位（与 ㉕ 同因）：:1278 还原过真时钟，本段驱动真 `_tick` ⇒ 重装假时钟；
+#   ⛔ `w._last = None` 必须一起给（否则 now-_last = 假值-真戳 = 大负数 ⇒ 负 dt）。
+time.perf_counter = lambda: _T[0]
+w._last = None
+
+
+def _draw_luna_mirrors():
+    """真跑 `w._draw_luna(p)`，返回 (这一帧是否施加了镜像 scale(-1,1), 全部 scale 调用)。
+
+    ⛔ 不替换被测函数，只把 `QPainter.scale` 换成记录器（同 ㉕ spy drawImage 的手法）。
+    ⭐ 只认 (sx < 0) 的那次 —— pack 分支里除镜像外没有别的 scale
+      （p.save / translate / drawImage / restore 都不缩放）。
+    """
+    from PySide6.QtGui import QImage, QPainter
+    canvas = QImage(64, 64, QImage.Format_ARGB32)
+    p = QPainter(canvas)
+    calls = []
+    _orig_scale = QPainter.scale
+
+    def _spy(_self, sx, sy):
+        calls.append((float(sx), float(sy)))
+
+    QPainter.scale = _spy
+    try:
+        w._draw_luna(p)
+    finally:
+        QPainter.scale = _orig_scale
+    p.end()
+    return any(sx < 0 for sx, _ in calls), calls
+
+
+print("㉖ PR36 · 桌宠 pack 分支镜像规则（正面永不镜像 / 侧面正确转身）")
+print("=" * 72)
+
+
+def _luna_air_left():
+    """把露娜摆进「空中 + 脸朝左」：离地、按住左几帧真实 _tick。
+
+    ⭐ face=-1 是 `Luna.update` 的 `dir_in` 赋值自然产生的（night.py:1716-1718），
+      ⛔ 不是测试手戳的 —— 手戳就测不到「空中也改 face」这条根因。
+    """
+    l = w.luna
+    l.x, l.y = 500.0, 300.0
+    l.vx = l.vy = 0.0
+    l.on_ground = False
+    w.keys = {Qt.Key_Left}
+    step(1 / 60, 5)
+    w.keys = set()
+    return l
+
+
+def _luna_ground_dir(key, n=10):
+    """把露娜摆进「地面按住某方向」：返回她（face 已自然定型）。"""
+    l = w.luna
+    l.x, l.y = 500.0, N.FLOOR_Y
+    l.vx = l.vy = 0.0
+    l.on_ground = True
+    w.keys = {key}
+    step(1 / 60, n)
+    w.keys = set()
+    return l
+
+
+# ---- 判据 A：正面动作 face=-1 也绝不镜像 ----
+w.start_night(0)
+l = _luna_air_left()
+l.act = "fall"                       # ⭐ 钉住正面动作；她此刻自然就是 fall（离地+vy≥-40）。
+#   ⛔ 钉 act 只为排除「调用间隙 pick_action 改段」，被测规则（镜像判据）的输入就是 (act, face)。
+_m_fall, _calls_fall = _draw_luna_mirrors()
+chk("㉖-1 ⭐⭐⭐ PR36 判据A：正面动作 fall 在 face=-1 时**绝不**镜像"
+    "（镜像只会把尾巴/呆毛搬到另一侧，正是「下落方向反了」的观感来源）",
+    l.face == -1 and l.act == "fall" and not _m_fall,
+    f"act={l.act} face={l.face} scale调用={_calls_fall}")
+
+# ---- 判据 A 阳性对照：同一套 spy，换成侧面动作 walk + face=-1 ⇒ 必须镜像 ----
+w.start_night(0)
+l = _luna_ground_dir(Qt.Key_Left)
+l.act = "walk"                       # ⭐ 侧面动作（pick_action 只在 sneak 回退时产 walk，
+#   ⛔ 这里直接钉 act —— 本判据测的是镜像规则对 (act, face) 的响应，不是选段逻辑。
+_m_walk_l, _calls_walk_l = _draw_luna_mirrors()
+chk("㉖-2 ⭐⭐ 判据A 阳性对照：侧面动作 walk 在 face=-1 时**必须**镜像（转身）"
+    " ⇒ 证明 ㉖-1 分得清「该镜像」与「不该镜像」，不是恒绿",
+    l.face == -1 and l.act == "walk" and _m_walk_l,
+    f"act={l.act} face={l.face} scale调用={_calls_walk_l}")
+
+# ---- 判据 B：侧面动作转身双向正确 ----
+w.start_night(0)
+l = _luna_ground_dir(Qt.Key_Right)
+l.act = "walk"
+_m_walk_r, _calls_walk_r = _draw_luna_mirrors()
+chk("㉖-3 ⭐⭐⭐ PR36 判据B：侧面动作 walk 在 face=+1（与源朝向一致）时**不**镜像",
+    l.face == 1 and l.act == "walk" and not _m_walk_r,
+    f"act={l.act} face={l.face} scale调用={_calls_walk_r}")
+
+# ---- 判据 B 阳性对照：同动作 face=-1 ⇒ 必须镜像（否则 ㉖-3 是恒绿摆设）----
+# ⭐ 与 ㉖-2 同 setup 是刻意的：㉖-2 是判据A 的对照，本条是判据B 的对照，角色不同。
+w.start_night(0)
+l = _luna_ground_dir(Qt.Key_Left)
+l.act = "walk"
+_m_walk_l2, _calls_walk_l2 = _draw_luna_mirrors()
+chk("㉖-4 ⭐⭐ 判据B 阳性对照：同一侧面动作 walk 在 face=-1 时**必须**镜像"
+    " ⇒ 证明 ㉖-3 抓的是「朝向一致性」这个量，不是「永远不镜像」",
+    l.face == -1 and _m_walk_l2,
+    f"act={l.act} face={l.face} scale调用={_calls_walk_l2}")
+
+
+# ---- 判据 C：Ronny 的原始场景全链路 ----
+def _run_chain():
+    """右跑 → 跳 → 空中按左 → 落地，逐帧记录 (act, face, 是否镜像)。
+
+    ⭐ 全程真实 `_tick` + 真实 `pick_action` 选段，⛔ 不钉 act ——
+      这条判据要证明的是「整条链路里没有任何一帧被误镜像」。
+    """
+    w.start_night(0)
+    l = w.luna
+    l.x, l.y = float(w.room.spawn_luna[0]), N.FLOOR_Y
+    l.vx = l.vy = 0.0
+    l.on_ground = True
+    log = []
+    for _keys, _n in (({Qt.Key_Right}, 10),                       # ① 向右跑（face=+1）
+                      ({Qt.Key_Right, Qt.Key_W}, 6),              # ② 起跳
+                      ({Qt.Key_Left}, 25),                        # ③ 空中按左 ⇒ face=-1
+                      (set(), 30)):                                # ④ 落地前后
+        w.keys = _keys
+        for _ in range(_n):
+            step(1 / 60, 1)
+            _m, _ = _draw_luna_mirrors()
+            log.append((l.act, l.face, _m))
+    w.keys = set()
+    return log
+
+
+_log = _run_chain()
+_mirrored = [r for r in _log if r[2]]
+_face_neg = [r for r in _log if r[1] == -1]
+chk("㉖-5 ⭐⭐⭐ PR36 判据C：Ronny 原始场景（右跑→跳→空中按左→落地）全程无镜像"
+    "（改前：空中 face=-1 时 fall 被镜像 ⇒ 尾巴/呆毛跳到左侧）",
+    len(_face_neg) > 0 and len(_mirrored) == 0,
+    f"共 {len(_log)} 帧；face=-1 的帧 {len(_face_neg)} 个"
+    f"（act 集合 {sorted({r[0] for r in _face_neg})}）；被镜像帧数 {len(_mirrored)}"
+    f"；出现过的 act {sorted({r[0] for r in _log})}")
+
+# ---- 判据 C 阳性对照：把规则在内存里临时改回 `if l.face < 0:` 重跑同一链路 ----
+# ⛔ night.py 一行未动：用 inspect.getsource + 字符串替换 + exec 在**测试侧**造旧版函数，
+#    只在本对照窗口内替换 `w._draw_luna`，跑完立即还原。
+# ⭐ 替换串必须与 night.py 里的 PR36 判据逐字一致 —— 对不上就炸，不许静默跳过。
+import inspect
+import textwrap
+
+_src_new = inspect.getsource(N.NightWindow._draw_luna)
+_src_old = _src_new.replace(
+    "        _psf = PACK_SRC_FACE.get(l.act, 1)\n"
+    "        if _psf != 0 and l.face != _psf:\n",
+    "        if l.face < 0:\n")
+assert _src_old != _src_new, "阳性对照替换失败：night.py 里找不到 PR36 判据原文"
+_ns = dict(N.__dict__)
+exec(compile(textwrap.dedent(_src_old), "<pr36-positive-control>", "exec"), _ns)
+_orig_dl = w._draw_luna
+w._draw_luna = _ns["_draw_luna"].__get__(w)
+try:
+    _log_ctrl = _run_chain()
+finally:
+    w._draw_luna = _orig_dl
+_mirrored_ctrl = [r for r in _log_ctrl if r[2]]
+chk("㉖-6 ⭐⭐ 判据C 阳性对照：规则临时改回 `if l.face < 0:` 重跑同一链路"
+    " ⇒ **至少一帧被镜像**（证明判据C 抓的是真回归，不是恒绿摆设）",
+    len(_mirrored_ctrl) > 0,
+    f"旧规则下被镜像 {len(_mirrored_ctrl)}/{len(_log_ctrl)} 帧"
+    f"（act 集合 {sorted({r[0] for r in _mirrored_ctrl})}）")
+
+print("=" * 72)
+print("㉖ PR36 段完成：本段 6 条（3 判据 + 3 阳性对照）")
+print("=" * 72)
+
+
+# ============================================================================
+# ㉗ · PR39（2026-10-14 设计端派单）run_carry 取帧公式去双乘（fps² bug）
+# ============================================================================
+# ⭐ 病灶：`_draw_luna` 的 run_carry 分支写 `int(l.t * GAME_FPS["run_carry"])`，
+#   而 `l.t` 在 `_tick` 里已是【帧单位】（`l.t += dt * fps`，night.py:5044）
+#   ⇒ fps 被乘了两次 ⇒ 24×24=576 步/秒 = 32 轮/秒（18 帧）= 无影手级频闪。
+# ⭐ 本段 2 条判据（㉗-1/2、㉗-3/4）全部【新增】，⛔ 不改本文件任何既有判据。
+# ⭐ 全程驱动真 `w._tick()` + spy `QPainter.drawImage`，按 QImage **对象身份**认帧索引。
+# ⭐⭐ 时钟复位（同 ㉕/㉖ 因：:1278 还原过真时钟；本段驱动真 `_tick`）：
+time.perf_counter = lambda: _T[0]
+w._last = None
+
+
+def _rc_index_of(pm):
+    """按 QImage 对象身份返回 run_carry 帧索引；不是 run_carry 帧则 None。"""
+    for i, row in enumerate(w.gframes.get("run_carry") or []):
+        if row[0] is pm:
+            return i
+    return None
+
+
+def _rc_drawn_idx(draw_fn=None):
+    """真跑 `w._draw_luna`（或指定替身），返回这一帧实际画的 run_carry 帧索引。
+
+    ⛔ 按 QImage **对象身份**认定，不看尺寸/内容（run_carry 18 帧同尺寸）。
+    None = 没画 run_carry 真帧（走了别的分支）。
+    """
+    from PySide6.QtGui import QImage, QPainter
+    canvas = QImage(64, 64, QImage.Format_ARGB32)
+    p = QPainter(canvas)
+    seen = []
+    _orig_di = QPainter.drawImage
+
+    def _spy(_self, *a):
+        seen.append(a)
+
+    QPainter.drawImage = _spy
+    try:
+        (draw_fn or w._draw_luna)(p)
+    finally:
+        QPainter.drawImage = _orig_di
+    p.end()
+    pm = None
+    for a in seen:
+        for it in a:
+            if isinstance(it, QImage):
+                pm = it
+                break
+        if pm is not None:
+            break
+    if pm is None:
+        return None
+    return _rc_index_of(pm)
+
+
+def _rc_seq(draw_fn=None, n=20):
+    """把露娜摆进 run_carry（按右键 + 拿东西），驱动 n 帧真 `_tick`，返回帧索引序列。
+
+    ⭐ 走 `|vx|>34 且 carrying` 这条路进 run_carry（`pick_action` :1994）——
+      ⛔ 不用 dash：dash 是滞空技，在地面上第一帧就"落地即结束"（night.py:1605-1607）。
+    ⛔ 不能把她放窝里（x < room.nest[1]=200）：night.py:4951「回窝卸货」会清空 carrying。
+    """
+    w.start_night(0)
+    w.mode = "play"
+    l = w.luna
+    l.carrying = ["鱼"]
+    l.x, l.y = 500.0, N.FLOOR_Y
+    l.vx = l.vy = 0.0
+    l.on_ground = True
+    l.act, l.t = "idle", 0.0
+    seq = []
+    for _ in range(n):
+        w.keys = {Qt.Key_Right}      # 持续右跑 ⇒ pick_action 恒返回 run_carry
+        l.carrying = ["鱼"]
+        w.phase, w.mode = "play", "play"
+        step(1 / 60, 1)
+        seq.append(_rc_drawn_idx(draw_fn))
+    w.keys = set()
+    return seq
+
+
+def _rc_stats(seq):
+    """(不同索引数, 相邻跳变峰值, 有效序列, 末首步进)。"""
+    valid = [i for i in seq if i is not None]
+    if len(valid) < 2:
+        return len(set(valid)), None, valid, None
+    jumps = [abs(valid[k + 1] - valid[k]) for k in range(len(valid) - 1)]
+    return len(set(valid)), max(jumps), valid, valid[-1] - valid[0]
+
+
+print("㉗ PR39 · run_carry 取帧公式去双乘（fps² bug）")
+print("=" * 72)
+
+# ---- 判据 A：run_carry 播放速率恢复到设计 24 步/秒 ----
+_seq_a = _rc_seq(None, 20)
+_dist_a, _jump_a, _valid_a, _step_a = _rc_stats(_seq_a)
+chk("㉗-1 ⭐⭐⭐ PR39 判据A：run_carry 恢复到设计 24 步/秒（不再 36 轮/秒频闪）——"
+    " 20 帧窗口内不同索引数 ≥ 6，且相邻索引跳变峰值 < 9",
+    len(_valid_a) == 20 and _dist_a >= 6 and _jump_a is not None and _jump_a < 9,
+    f"帧序列={_seq_a} 不同索引={_dist_a} 相邻跳变峰值={_jump_a}")
+
+# ---- 判据 A 阳性对照：取帧公式临时戳回双乘（测试侧 exec，night.py 一行未动）----
+_src_now = inspect.getsource(N.NightWindow._draw_luna)
+_src_dbl = _src_now.replace(
+    "_k = int(l.t) % len(_rf)",
+    '_k = int(l.t * GAME_FPS["run_carry"]) % len(_rf)')
+assert _src_dbl != _src_now, "阳性对照替换失败：night.py 里找不到 PR39 取帧行原文"
+_ns39 = dict(N.__dict__)
+exec(compile(textwrap.dedent(_src_dbl), "<pr39-positive-control>", "exec"), _ns39)
+_orig_dl39 = w._draw_luna
+w._draw_luna = _ns39["_draw_luna"].__get__(w)
+try:
+    _seq_c = _rc_seq(w._draw_luna, 20)
+finally:
+    w._draw_luna = _orig_dl39
+_dist_c, _jump_c, _valid_c, _step_c = _rc_stats(_seq_c)
+chk("㉗-2 ⭐⭐ 判据A 阳性对照：取帧公式临时改回 `int(l.t * GAME_FPS[\"run_carry\"])`"
+    "（inspect.getsource+exec，night.py 未动）⇒ 相邻跳变峰值必须 ≥ 9",
+    _jump_c is not None and _jump_c >= 9,
+    f"帧序列={_seq_c} 相邻跳变峰值={_jump_c}")
+
+# ---- 判据 B：素材与帧表两条路径都就绪 + 手感常量未被顺手改动 ----
+# ⚠️ 派单原文写「读 self.gframes.get('run_carry') 与 w.imgs.get('run_carry') 均非空」，
+#   但 run_carry **不是桌宠动作**（`NEED_ACTIONS` 里没有它，pet.json 也没有）⇒ `w.imgs`
+#   里恒为 None。run_carry 的真实「素材」路径是盘上 `assets_game/run_carry/`，
+#   「帧表」路径是 `self.gframes["run_carry"]`（`_load_game_frames` 读入）。
+#   ⇒ 本判据按**真实的两条路径**实现（盘上素材 + 内存帧表），已在回执里报备。
+_RC_DIR = os.path.join(N.GAME_ASSETS, "run_carry")
+_rc_meta = os.path.join(_RC_DIR, "_meta.json")
+_rc_pngs = ([f for f in os.listdir(_RC_DIR) if f.endswith(".png")]
+            if os.path.isdir(_RC_DIR) else [])
+_grf39 = w.gframes.get("run_carry") or []
+chk("㉗-3 ⭐⭐ PR39 判据B：run_carry 素材（盘上）与帧表（内存 gframes）两条路径都 OK，"
+    "且手感常量（GAME_FPS/ATK 三段）未被顺手改动",
+    len(_grf39) > 0 and os.path.isfile(_rc_meta) and len(_rc_pngs) > 0
+    and N.GAME_FPS["run_carry"] == 24.0
+    and (N.ATK_WIND, N.ATK_ACT, N.ATK_REC) == (0.16, 0.09, 0.42),
+    f"gframes={len(_grf39)}帧 盘上素材={len(_rc_pngs)}个 meta={os.path.isfile(_rc_meta)} "
+    f"GAME_FPS[run_carry]={N.GAME_FPS['run_carry']} "
+    f"ATK=({N.ATK_WIND},{N.ATK_ACT},{N.ATK_REC})")
+
+# ---- 判据 B 阳性对照：把 GAME_FPS["run_carry"] 戳成 12.0 ⇒ 步进应减半（~4）----
+_fps_bak39 = N.GAME_FPS["run_carry"]
+N.GAME_FPS["run_carry"] = 12.0
+try:
+    _seq_b = _rc_seq(None, 20)
+finally:
+    N.GAME_FPS["run_carry"] = _fps_bak39
+_dist_b, _jump_b, _valid_b, _step_b = _rc_stats(_seq_b)
+chk("㉗-4 ⭐⭐ 判据B 阳性对照：`GAME_FPS[\"run_carry\"]` 戳成 12.0（已还原 24.0）"
+    " ⇒ 20 帧末首步进应减半到 ~4（证明判据测的是 fps 这个量，不是恒绿）",
+    _step_b is not None and 3 <= _step_b <= 5,
+    f"步进={_step_b}（fps=24 时 ≈{_step_a}；fps=12 时应 ≈4）已还原为 {N.GAME_FPS['run_carry']}")
+
+print("=" * 72)
+print("㉗ PR39 段完成：本段 4 条（2 判据 + 2 阳性对照）")
+print("=" * 72)
+
+
+# ============================================================================
+# ㉘ · PR37-v2（2026-10-14 设计端派单）escort 期间播放 drag 姿势
+# ============================================================================
+# ⭐ 病灶：① `drag` 不在 `NEED_ACTIONS` ⇒ 帧没加载 ⇒ `l.act="drag"` **静默兜底画 idle**；
+#   ② `escort` 是孤儿标志（全文件只置 False）⇒ 押送演出（meowed 1.5s + hauled 0.9s）不播 drag。
+# ⭐ 本段 2 条判据（㉘-1/2、㉘-3/4）全部【新增】，⛔ 不改本文件任何既有判据/阈值。
+# ⭐⭐ 判据 A 以「**画出帧身份 == drag**」为准，⛔ 不看 `l.act` 字符串 ——
+#   那正是原 PR37 漏掉的坑（act 写得对、画出来是 idle，判据照样绿）。
+# ⭐⭐ 时钟复位（同 ㉕/㉖/㉗ 因：:1278 还原过真时钟；本段驱动真 `_tick`）：
+time.perf_counter = lambda: _T[0]
+w._last = None
+
+
+def _frame_owner(pm):
+    """按 QImage 对象身份反查这一帧属于 `self.imgs` 里的哪个动作，返回 (动作名, 索引)。
+
+    ⛔ 不看尺寸/内容 —— 按**对象身份**（不同动作的帧是不同文件 ⇒ 不同 QImage）。
+    (None, None) = 不属于任何已加载的桌宠动作帧。
+    """
+    for name, lst in (w.imgs or {}).items():
+        for i, im in enumerate(lst or []):
+            if im is pm:
+                return name, i
+    return None, None
+
+
+def _luna_drawn_frame():
+    """真跑 `w._draw_luna`，返回 (帧所属动作名, 索引, l.act)。
+
+    动作名按 QImage 对象身份从 `w.imgs` 反查 ⇒ 能识破「l.act=drag 但画的是 idle」。
+    """
+    from PySide6.QtGui import QImage, QPainter
+    canvas = QImage(64, 64, QImage.Format_ARGB32)
+    p = QPainter(canvas)
+    seen = []
+    _orig_di = QPainter.drawImage
+
+    def _spy(_self, *a):
+        seen.append(a)
+
+    QPainter.drawImage = _spy
+    try:
+        w._draw_luna(p)
+    finally:
+        QPainter.drawImage = _orig_di
+    p.end()
+    pm = None
+    for a in seen:
+        for it in a:
+            if isinstance(it, QImage):
+                pm = it
+                break
+        if pm is not None:
+            break
+    if pm is None:
+        return None, None, w.luna.act
+    name, idx = _frame_owner(pm)
+    return name, idx, w.luna.act
+
+
+def _escort_run(n=170, mw_far=False):
+    """把露娜放到越界区、微波炉贴脸 ⇒ 真 `_tick` 触发抓捕 → 押送（meowed + hauled）。
+
+    逐帧记 (phase, l.act, 帧所属动作名, 索引, l.escort)。
+    ⛔ mw_far=True = 阳性对照：每帧把微波炉钉到 x=5000（`_patrol` 不位移，钉得住）
+      ⇒ `mw.caught()` 恒 False ⇒ 永不进 meowed ⇒ 判据 A 的触发关掉。
+    """
+    w.start_night(0)
+    w.mode, w.phase = "play", "play"
+    l = w.luna
+    l.carrying = []
+    l.escort = False
+    l.x, l.y = 500.0, float(N.FLOOR_Y)
+    l.vx = l.vy = 0.0
+    l.on_ground = True
+    l.act, l.t = "idle", 0.0
+    l.dash_i = 0.0
+    w.mw.state = "patrol"
+    w.mw.alert = 0.0
+    w.mw.x = (5000.0 if mw_far else 500.0)
+    w.mw.y = float(N.FLOOR_Y)
+    w.keys = set()
+    log = []
+    for _ in range(n):
+        w.keys = set()
+        if mw_far:
+            w.mw.x = 5000.0
+            w.mw.y = float(N.FLOOR_Y)
+        step(1 / 60, 1)
+        _name, _idx, _act = _luna_drawn_frame()
+        log.append((w.phase, _act, _name, _idx, bool(l.escort)))
+    return log
+
+
+print("㉘ PR37-v2 · escort 期间播放 drag 姿势")
+print("=" * 72)
+
+# ---- 判据 A：escort 全程画出的确实是 drag 帧（不是静默兜底 idle）----
+_log_e = _escort_run(170, mw_far=False)
+_esc = [r for r in _log_e if r[4]]                       # escort=True 的帧
+_esc_idx = [i for i, r in enumerate(_log_e) if r[4]]
+_post = _log_e[(_esc_idx[-1] + 1):] if _esc_idx else []  # escort 结束之后的帧
+_meow = [r for r in _esc if r[0] == "meowed"]
+_haul = [r for r in _esc if r[0] == "hauled"]
+_bad_kind = [r for r in _esc if r[2] != "drag"]
+_bad_act = [r for r in _esc if r[1] != "drag"]
+_post_drag = [r for r in _post if r[1] == "drag" or r[2] == "drag"]
+chk("㉘-1 ⭐⭐⭐ PR37-v2 判据A：escort 全程（meowed + hauled 都采到）`l.act=='drag'`"
+    " 且**画出的帧身份属于 drag**（⛔ 不是 act 写 drag、画的是 idle）；"
+    " 退出 escort 后 `l.act` 跟随 pick_action 推导、不残留 drag",
+    len(_esc) > 100 and len(_meow) > 0 and len(_haul) > 0
+    and len(_bad_act) == 0 and len(_bad_kind) == 0
+    and len(_post) > 0 and len(_post_drag) == 0,
+    f"escort 帧={len(_esc)}（meowed={len(_meow)} hauled={len(_haul)}）"
+    f" act≠drag={len(_bad_act)} 画出非drag={len(_bad_kind)}"
+    f" 退出后帧={len(_post)}（残留 drag={len(_post_drag)}，"
+    f"退出后动作={sorted({r[1] for r in _post})}）"
+    f" 帧身份序列前 12={[r[2] for r in _esc[:12]]}")
+
+# ---- 判据 A 阳性对照：微波炉钉远（永不 caught）⇒ 全程不出现 drag ----
+_log_c = _escort_run(170, mw_far=True)
+_esc_c = [r for r in _log_c if r[4]]
+_drag_c = [r for r in _log_c if r[1] == "drag" or r[2] == "drag"]
+chk("㉘-2 ⭐⭐ 判据A 阳性对照：微波炉每帧钉到 x=5000（`mw.caught` 恒 False、永不进 meowed）"
+    " ⇒ 全程**不出现** drag（不出现 escort、不出现 l.act=='drag'、不画出 drag 帧）",
+    len(_esc_c) == 0 and len(_drag_c) == 0,
+    f"escort 帧={len(_esc_c)} 含 drag 的帧={len(_drag_c)}"
+    f"（相位集合={sorted({r[0] for r in _log_c})}）")
+
+# ---- 判据 B：drag 素材确实进了 self.imgs，且没顺手碰别的 ----
+_src_dl = inspect.getsource(N.NightWindow._draw_luna)
+_rc_line_ok = "_k = int(l.t) % len(_rf)" in _src_dl
+_drag_imgs = w.imgs.get("drag") or []
+chk("㉘-3 ⭐⭐ PR37-v2 判据B：`NEED_ACTIONS` 加词生效 ⇒ `self.imgs['drag']` 非空，"
+    "且 GAME_FPS / ATK 三段 / run_carry 取帧公式（:6375）与本单改动前一致（没顺手碰别的）",
+    len(_drag_imgs) > 0
+    and N.GAME_FPS == {"mw_walk": 12.0, "run_carry": 24.0, "attack": 24.0,
+                       "attack_charge": 24.0, "mw_idle": 8.0}
+    and (N.ATK_WIND, N.ATK_ACT, N.ATK_REC) == (0.16, 0.09, 0.42)
+    and _rc_line_ok,
+    f"imgs['drag']={len(_drag_imgs)}帧 GAME_FPS={N.GAME_FPS} "
+    f"ATK=({N.ATK_WIND},{N.ATK_ACT},{N.ATK_REC}) run_carry取帧行OK={_rc_line_ok}")
+
+# ---- 判据 B 阳性对照：临时把 NEED_ACTIONS 里 "drag" 摘掉再加载 ⇒ imgs["drag"] 应为 None ----
+_need_bak = list(N.NEED_ACTIONS)
+try:
+    N.NEED_ACTIONS = [a for a in N.NEED_ACTIONS if a != "drag"]
+    _imgs_wo = N._load_needed(w.pack, N.NEED_ACTIONS)
+finally:
+    N.NEED_ACTIONS = _need_bak
+chk("㉘-4 ⭐⭐ 判据B 阳性对照：临时把 `NEED_ACTIONS` 里的 \"drag\" 摘掉再 `_load_needed`"
+    " ⇒ `imgs['drag']` 必须为 None（证明判据测的是「加载名单」这个量，不是恒绿）",
+    _imgs_wo.get("drag") is None and "drag" in N.NEED_ACTIONS,
+    f"摘掉后 imgs['drag']={_imgs_wo.get('drag')}；NEED_ACTIONS 已还原={N.NEED_ACTIONS}")
+
+print("=" * 72)
+print("㉘ PR37-v2 段完成：本段 4 条（2 判据 + 2 阳性对照）")
+print("=" * 72)
