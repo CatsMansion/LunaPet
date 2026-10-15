@@ -178,6 +178,9 @@ class ToolBar(QWidget):
         self._hub.setAttribute(Qt.WA_DeleteOnClose, True)
         self._hub.destroyed.connect(self._on_hub_closed)
         self._hub.show()
+        # ⭐⭐ 2026-10-14 Ronny：「游戏窗口打开时，桌宠露娜要走到屏幕右下角，然后播放动作打游戏」
+        #   ⇒ 主界面一开就叫她去坐下（她自己走过去，不是瞬移 —— core.Pet.go_and_play）。
+        self._pet_go_play()
         # ⭐ 抽屉是 WindowStaysOnTopHint，会一直压在游戏窗口上面挡住画面。
         #   进游戏期间先藏起来，退出游戏再放回来。
         self._drop_held_tool()
@@ -186,12 +189,41 @@ class ToolBar(QWidget):
 
     def _on_hub_closed(self, *_):
         self._hub = None
+        # ⭐⭐ 2026-10-14：游戏窗关了 ⇒ 结束游戏姿态，露娜站起来回到正常漫游
+        self._pet_stop_play()
         try:
             self.show()
             self._home = self.pos()          # 期间可能没动，保险同步一次
         except Exception:
             pass
         print("[游戏] 已退出")
+
+    # ---- ⭐⭐ 2026-10-14 游戏姿态：桌宠走过去坐下打游戏（Ronny 口述需求）----
+    def _pet_go_play(self):
+        """让桌宠走到主屏右下角，然后循环播 `gamepad`（打游戏）。
+
+        ⚠️ 属性链：`self.pet` 是 **PetWindow**，它的 `.pet` 才是 **core.Pet**
+           （见 ui.py:204 `self.pet = Pet(pack, self.screen_rect)`）。
+        ⛔ 这纯粹是"表现"，拿不到 pet（自测夹具 / 旧调用）就连带跳过，
+           **不许**让开个游戏窗口因为这点边角表现而失败。
+        """
+        try:
+            _pw = self.pet
+            _core = getattr(_pw, "pet", None)
+            if _core is None:
+                return
+            _core.go_and_play("gamepad")
+        except Exception as e:                       # noqa: BLE001
+            print(f"[游戏] ⛔ 露娜没去坐下：{type(e).__name__}: {e}")
+
+    def _pet_stop_play(self):
+        """结束游戏姿态（关游戏窗时调）。⛔ 同上：失败只打印，不抛。"""
+        try:
+            _core = getattr(self.pet, "pet", None)
+            if _core is not None:
+                _core.end_game_act()
+        except Exception as e:                       # noqa: BLE001
+            print(f"[游戏] ⛔ 露娜没站起来：{type(e).__name__}: {e}")
 
     def _on_night_closed(self, *_):
         # ⭐ 2026-10-05：主界面接管后，night 自己关掉**不会**走到这里

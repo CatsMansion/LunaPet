@@ -1954,14 +1954,24 @@ chk("㉘-2 ⭐⭐ 判据A 阳性对照：微波炉每帧钉到 x=5000（`mw.caug
     f"（相位集合={sorted({r[0] for r in _log_c})}）")
 
 # ---- 判据 B：drag 素材确实进了 self.imgs，且没顺手碰别的 ----
+# ⭐⭐ 2026-10-15 PR38：本判据的 GAME_FPS 部分由「全字典相等」改为**逐字段**核对。
+#   原写法 `GAME_FPS == {五键}` 是 PR37-v2 完工态的**快照**，容不下后续派单的
+#   合法演进（PR38 加 "dash" 键、PR35-v2 把 attack/attack_charge 改 12.0）——
+#   一加/一改就红，而那不是「PR37-v2 顺手碰坏了」。⛔ 不是为凑绿削判据：
+#   · mw_walk / run_carry / mw_idle 三键值 + ATK 三段 + run_carry 取帧公式：
+#     仍逐字守护（这些没有派单要动）；
+#   · attack / attack_charge 的**值**归 PR35-v2 的 ㉚ 段守护；
+#   · "dash" 键归 PR38 的 ㉙ 段守护。
 _src_dl = inspect.getsource(N.NightWindow._draw_luna)
 _rc_line_ok = "_k = int(l.t) % len(_rf)" in _src_dl
 _drag_imgs = w.imgs.get("drag") or []
+_g37 = N.GAME_FPS
 chk("㉘-3 ⭐⭐ PR37-v2 判据B：`NEED_ACTIONS` 加词生效 ⇒ `self.imgs['drag']` 非空，"
-    "且 GAME_FPS / ATK 三段 / run_carry 取帧公式（:6375）与本单改动前一致（没顺手碰别的）",
+    "且 GAME_FPS 非攻击三键 / ATK 三段 / run_carry 取帧公式（:6380）与本单改动前一致"
+    "（没顺手碰别的）〔GAME_FPS 攻击键值归 ㉚、dash 键归 ㉙ 守护，见上方说明〕",
     len(_drag_imgs) > 0
-    and N.GAME_FPS == {"mw_walk": 12.0, "run_carry": 24.0, "attack": 24.0,
-                       "attack_charge": 24.0, "mw_idle": 8.0}
+    and (_g37.get("mw_walk"), _g37.get("run_carry"), _g37.get("mw_idle")) == (12.0, 24.0, 8.0)
+    and "attack" in _g37 and "attack_charge" in _g37
     and (N.ATK_WIND, N.ATK_ACT, N.ATK_REC) == (0.16, 0.09, 0.42)
     and _rc_line_ok,
     f"imgs['drag']={len(_drag_imgs)}帧 GAME_FPS={N.GAME_FPS} "
@@ -1982,3 +1992,415 @@ chk("㉘-4 ⭐⭐ 判据B 阳性对照：临时把 `NEED_ACTIONS` 里的 \"drag\
 print("=" * 72)
 print("㉘ PR37-v2 段完成：本段 4 条（2 判据 + 2 阳性对照）")
 print("=" * 72)
+
+# ============================================================================
+# ⭐⭐ ㉙ PR38 · dash 冲刺接线（2026-10-15）
+#
+# 派单四处改动：① GAME_FPS 加 "dash": 60.0（AC03 选 D：12 帧素材在 0.2s
+#   窗口双倍速播完）② `_draw_luna` 加 dash 分支（⛔ 用 `int(l.t) % len`，
+#   ⛔ 不抄 attack 的 `int(l.t * GAME_FPS[l.act])` fps² 双乘）③ GAME_SRC_FACE
+#   加 "dash": 1 ④ pick_action 空手冲刺从 human_run 改 dash（拿东西仍 run_carry）。
+#
+# ⚠️⚠️ 素材前置（派单 §〇 + 设计端核验）：`assets_game/dash/` **不存在**
+#   ⇒ `_load_game_frames` 缺目录时 `out["dash"] = []`（night.py:4301 静默占位）
+#   ⇒ 判据 A 主线靠**夹具内存注入** 12 张 QImage 假帧驱动真 `_draw_luna`
+#   （⛔ 不落盘、⛔ 不改 `_load_game_frames`、跑完还原成原生 [] 态）；
+#   验证的是「接线 + 取帧公式 + 朝向」，**AC03 素材真容未验证**（派单 §四 已预告）。
+# ⚠️ 阳性对照②（派单「临时删 assets_game/dash/」）：目录本就不存在，
+#   无法执行「删除」⇒ 用**不注入假帧**的原生缺失态等价实现（gframes["dash"]
+#   原生即 []，与「删完素材」同一效果），回执已报备。
+#
+# ⭐⭐ 时钟复位（同 ㉗：驱动真 `_tick`）：
+time.perf_counter = lambda: _T[0]
+w._last = None
+
+from PySide6.QtGui import QImage   # ⭐ PR38 判据注入假帧用（文件头只导了 QPixmap）
+
+
+# ⚠️⚠️ 既有 bug（2026-10-15 探针 `_pr38_probe.py` 实锤，⛔ 本单不修、待 Ronny 拍板）：
+#   `Luna.update` dash 分支（night.py:1600-1609）起手时 `vy += GRAVITY*dt*0.35`
+#   ⇒ y 必超 FLOOR_Y ⇒ `if self.y >= FLOOR_Y: ... self.dash_t = 0.0`（:1607-1609
+#   「落地即结束」）在**地面起手第一帧**就命中 ⇒ dash_t 归零、只剩 ~10px 位移。
+#   ⇒ 真机站地上按 K 冲刺无效（设计意图 620px/s×0.2s=124px 完全没体现）。
+#   ⛔ PR38 派单红线「四常量全不动」且落地逻辑不在授权范围 ⇒ 本单只接线不修它；
+#   ⇒ 判据 A 用**起手高度 FLOOR_Y-30**（空中起手，24 帧内落不回地面）绕过，
+#     验证的是「取帧公式 + 0.2s 窗口」这条接线，⛔ 不守护也不固化这个 bug。
+# ⚠️ dt 兜底（night.py:4835）：`_tick` 第一帧 dt=0.016（`_last is None`），
+#   之后才是我喂的 1/120 ⇒ 判据不断言精确帧数（对兜底不敏感），
+#   断言「12 帧全集播到 + 末帧退出」这种鲁棒形态。
+
+
+def _dash_index_of(pm):
+    """按 QImage 对象身份返回 dash 帧索引；不是 dash 帧则 None。"""
+    for i, row in enumerate(w.gframes.get("dash") or []):
+        if row[0] is pm:
+            return i
+    return None
+
+
+def _dash_drawn_idx():
+    """真跑 `w._draw_luna`，返回这一帧实际画的 dash 帧索引（按对象身份）。
+
+    None = 没画 dash 帧（走了桌宠分支 / 别的分支）。
+    ⛔ 与 ㉗ `_rc_drawn_idx` 同一手法：只把 QPainter.drawImage 换成记录器。
+    """
+    from PySide6.QtGui import QImage, QPainter
+    canvas = QImage(64, 64, QImage.Format_ARGB32)
+    p = QPainter(canvas)
+    seen = []
+    _orig_di = QPainter.drawImage
+
+    def _spy(_self, *a):
+        seen.append(a)
+
+    QPainter.drawImage = _spy
+    try:
+        w._draw_luna(p)
+    finally:
+        QPainter.drawImage = _orig_di
+    p.end()
+    pm = None
+    for a in seen:
+        for it in a:
+            if isinstance(it, QImage):
+                pm = it
+                break
+        if pm is not None:
+            break
+    if pm is None:
+        return None
+    return _dash_index_of(pm)
+
+
+def _dash_seq(n=24, dt=1.0 / 120.0):
+    """触发一次真 dash，驱动 n 帧真 `_tick`，逐帧返回实际画出的 dash 帧索引。
+
+    ⭐ dt 取 1/120：60fps 下 l.t 每帧 +1.0，k 从 1 起跳；1/120 每帧 +0.5，
+      0.2s 内 k=0~11 每个都有驻留帧（第一帧 dt 走 0.016 兜底，见段首说明）。
+    ⭐ 起手 y=FLOOR_Y-30：绕过既有「地面起手被落地即结束掐断」bug（段首已论证），
+      24 帧内 vy 累积位移 ~13px，落不回 FLOOR_Y ⇒ dash_t 不被误掐。
+    ⛔ 不造盘上素材：只往内存 gframes 注入（调用方负责注入/还原）。
+    """
+    w.start_night(0)
+    w.mode = "play"
+    l = w.luna
+    # 清掉所有会挡住 try_dash / 干扰 pick_action 的状态
+    l.carrying = []
+    l.escort = False
+    l.charging = False
+    l.punch = 0.0
+    l.atk_cd = l.atk_wind = l.atk_act = l.atk_rec = 0.0
+    l.dash_t = l.dash_i = l.dash_cd = 0.0
+    l.x, l.y = 500.0, N.FLOOR_Y - 30.0
+    l.vx = l.vy = 0.0
+    l.on_ground = True
+    l.act, l.t = "idle", 0.0
+    assert l.try_dash(1), "try_dash 应成功（已清空 cd / 三段 / dash_t）"
+    seq = []
+    for _ in range(n):
+        w.keys = set()
+        step_pure(dt, 1)
+        seq.append(_dash_drawn_idx())
+    return seq, l
+
+
+# ---- 判据 A：0.2s 窗口内 12 帧素材播完（fps=60 双倍速），退出后回落 ----
+_dash_fake = [(QImage(48, 64, QImage.Format_ARGB32), 48, 64, 24, 64)
+              for _ in range(12)]
+_dash_native = w.gframes.get("dash")          # 原生态：素材未落盘 ⇒ []
+assert _dash_native == [], f"预期原生 gframes['dash'] 为 []，实得 {_dash_native!r}"
+try:
+    w.gframes["dash"] = _dash_fake
+    _seqA, _lA = _dash_seq(n=24)
+finally:
+    w.gframes["dash"] = _dash_native
+_dashA = [x for x in _seqA if x is not None]
+chk("㉙-1 ⭐⭐⭐ PR38 判据A：真触发 dash 后 `_draw_luna` 画出的**确实是 dash 游戏帧**"
+    "（按 QImage 对象身份反查），且 0.2s 窗口内 12 帧素材 **0→11 全部播到**"
+    "（GAME_FPS['dash']=60 双倍速）；窗口结束（dash_t 归零）后不再画 dash 帧、"
+    " `l.act` 回落到 idle〔起手高度 FLOOR_Y-30 绕过既有落地 bug，见段首〕",
+    set(_dashA) == set(range(12)) and len(_dashA) >= 20
+    and _seqA[-1] is None and _lA.act == "idle",
+    f"画出 dash 帧 {len(_dashA)}/24 帧 索引集合={sorted(set(_dashA))}"
+    f"（缺 {sorted(set(range(12)) - set(_dashA))}）"
+    f" 末帧={_seqA[-1]} 退出后 act={_lA.act}")
+
+# ---- 判据 A 阳性对照①：fps 改回 24.0 ⇒ 0.2s 只播前 5 帧（k=0~4）----
+_fps_native = N.GAME_FPS.get("dash")
+try:
+    N.GAME_FPS["dash"] = 24.0
+    w.gframes["dash"] = _dash_fake
+    _seqB, _lB = _dash_seq(n=24)
+finally:
+    if _fps_native is None:
+        N.GAME_FPS.pop("dash", None)
+    else:
+        N.GAME_FPS["dash"] = _fps_native
+    w.gframes["dash"] = _dash_native
+_dashB = [x for x in _seqB if x is not None]
+chk("㉙-2 ⭐⭐ 判据A 阳性对照①：临时把 `GAME_FPS['dash']` 改回 24.0 ⇒ 0.2s 窗口内"
+    " **只播前 5 帧**（k=0~4，24fps 单倍速）——证明判据A 抓的是 60.0 这个值，"
+    " 不是恒绿（跑完已还原 60.0）",
+    len(_dashB) > 0 and set(_dashB) == {0, 1, 2, 3, 4} and 11 not in _dashB
+    and N.GAME_FPS.get("dash") == 60.0,
+    f"fps=24 时索引集合={sorted(set(_dashB))}（帧数 {len(_dashB)}）"
+    f" 还原后 GAME_FPS['dash']={N.GAME_FPS.get('dash')}")
+
+# ---- 判据 B：接线点到位（读模块/窗口真实值，⛔ 不自设值）----
+_src_dl38 = inspect.getsource(N.NightWindow._draw_luna)
+_dl38_tail = _src_dl38.split("# ============ PR38 · dash 走游戏帧")[-1]
+_no_fps2 = "int(l.t * GAME_FPS" not in _dl38_tail          # dash 段无 fps² 双乘
+_has_ok = "_k = int(l.t) % len(_df)" in _dl38_tail         # dash 段用修正公式
+_l38 = w.luna
+_l38.carrying = []
+_l38.dash_t, _l38.escort, _l38.charging, _l38.punch = 0.20, False, False, 0.0
+_l38.atk_wind = _l38.atk_act = _l38.atk_rec = 0.0
+_pa_dash = _l38.pick_action()
+_l38.carrying = ["鱼"]
+_pa_carry = _l38.pick_action()
+_l38.carrying = []
+_l38.dash_t = 0.0
+chk("㉙-3 ⭐⭐ PR38 判据B：四处接线全部到位且读的是**真实值**——"
+    " `GAME_FPS['dash']==60.0`；`GAME_SRC_FACE['dash']==1`；"
+    " 真调 `pick_action`：dash_t>0 且空手 ⇒ 'dash'、拿着东西 ⇒ 'run_carry'；"
+    " `_draw_luna` 的 dash 分支用 `int(l.t) % len(_df)`（⛔ 无 fps² 双乘）",
+    N.GAME_FPS.get("dash") == 60.0 and N.GAME_SRC_FACE.get("dash") == 1
+    and _pa_dash == "dash" and _pa_carry == "run_carry"
+    and _has_ok and _no_fps2,
+    f"GAME_FPS['dash']={N.GAME_FPS.get('dash')} "
+    f"GAME_SRC_FACE['dash']={N.GAME_SRC_FACE.get('dash')} "
+    f"pick_action(空手)={_pa_dash!r} pick_action(拿鱼)={_pa_carry!r} "
+    f"取帧公式OK={_has_ok} 双乘已除={_no_fps2}")
+
+# ---- 判据 B 阳性对照②：无 dash 帧（= 素材缺失态）⇒ 不画 dash 帧 ----
+# ⚠️ 派单原文「临时删 assets_game/dash/」——目录本就不存在，无法「删」；
+#    gframes['dash'] 原生即 []（_load_game_frames 缺目录占位，night.py:4301）
+#    ⇒ **不注入假帧**与「删完素材」是同一状态，等价实现。
+w.gframes["dash"] = _dash_native          # 确保回到原生缺失态
+_seqC, _lC = _dash_seq(n=3)
+chk("㉙-4 ⭐⭐ 判据B 阳性对照②：`gframes['dash']` 为原生缺失态（[]）时触发 dash"
+    " ⇒ `_draw_luna` **画不出任何 dash 帧**（全 None，落桌宠分支）——"
+    " 证明判据A 走的是 dash 游戏帧路径，不是桌宠分支冒充",
+    all(x is None for x in _seqC) and len(_seqC) == 3,
+    f"3 帧反查结果={_seqC}（全 None={all(x is None for x in _seqC)}）"
+    f" 期间应打印「游戏帧缺 dash」告警")
+
+print("=" * 72)
+print("㉙ PR38 段完成：本段 4 条（2 判据 + 2 阳性对照）")
+print("=" * 72)
+
+# ============================================================================
+# ⭐⭐ ㉚ PR35-v2 · 攻击帧率与循环方式（2026-10-15，Ronny 拍板 #7 全按推荐 B）
+#
+# 派单三处改动：① GAME_FPS attack/attack_charge 24.0→12.0
+#   ② attack 取帧 `int(l.t*GAME_FPS)`（fps²）→ `int(l.t)` pingpong
+#   ③ 删 Luna.update 里 punch 递减（_tick :4867-4868 为唯一裁判）
+#
+# ⚠️⚠️ 两处派单前提被实测修正（回执已报备）：
+#   A. 派单写「0.67s 窗口内播到 f7/f8 **再收回**」——实测 fps=12 时 0.67s
+#      只能推进 ~8.19 帧（12fps×0.667s），pingpong 周期 30，**窗口内只走
+#      上升段 0→8，永远到不了峰 15**，「收回」段在窗口外（act 已切回 idle）。
+#      ⇒ 判据按实测断言「峰值 7~8 + 窗口内单调不减」，⛔ 不断言「递减」。
+#   B. 派单阳性对照①写「fps 改回 24.0 ⇒ 步进 ~16（糊/频闪）」——那是 **fps²
+#      旧公式**的病征；新 pingpong 公式下 fps=24 ⇒ 0.67s 正好推进 16.4 帧
+#      ⇒ k 走 0..15 再收回一帧 = **完整挥出**（另一种自洽设计，不是 bug）。
+#      ⇒ 阳性对照①按实测断言「峰值 15 ≠ 8」，证明判据抓的是 fps 值。
+
+
+def _atk_index_of(pm):
+    """按 QImage 对象身份返回 attack 帧索引；不是 attack 帧则 None。"""
+    for i, row in enumerate(w.gframes.get("attack") or []):
+        if row[0] is pm:
+            return i
+    return None
+
+
+def _atk_drawn_idx():
+    """真跑 `w._draw_luna`，返回这一帧实际画的 attack 帧索引（按对象身份）。"""
+    from PySide6.QtGui import QImage, QPainter
+    canvas = QImage(64, 64, QImage.Format_ARGB32)
+    p = QPainter(canvas)
+    seen = []
+    _orig_di = QPainter.drawImage
+
+    def _spy(_self, *a):
+        seen.append(a)
+
+    QPainter.drawImage = _spy
+    try:
+        w._draw_luna(p)
+    finally:
+        QPainter.drawImage = _orig_di
+    p.end()
+    pm = None
+    for a in seen:
+        for it in a:
+            if isinstance(it, QImage):
+                pm = it
+                break
+        if pm is not None:
+            break
+    if pm is None:
+        return None
+    return _atk_index_of(pm)
+
+
+def _atk_seq(n=45, dt=1.0 / 60.0):
+    """触发一次真普攻（lvl=0），驱动 n 帧真 `_tick`，返回 (帧索引序列, punch 归零帧号, luna)。
+
+    ⭐ n=45 > 0.67s 窗口（41 tick）⇒ 能同时看到「窗口内挥出」与「退出后回落」。
+    ⭐ dt=1/60（⛔ 不用 1/120）：punch 归零 tick 数 41 是按 60fps 的设计口径
+      （0.67s ÷ 1/60 = 40.2 ⇒ 第 41 帧归零；第一帧 dt 走 0.016 兜底，night.py:4835）。
+    ⛔ 不造盘上素材：attack 16 帧真素材已在盘上，gframes 直接可用。
+    """
+    w.start_night(0)
+    w.mode = "play"
+    l = w.luna
+    l.carrying = []
+    l.escort = False
+    l.charging = False
+    l.punch = 0.0
+    l.atk_cd = 0.0
+    l.atk_wind = l.atk_act = l.atk_rec = 0.0
+    l.dash_t = l.dash_i = l.dash_cd = 0.0
+    l.x, l.y = 500.0, N.FLOOR_Y
+    l.vx = l.vy = 0.0
+    l.on_ground = True
+    l.act, l.t = "idle", 0.0
+    assert l.try_attack(0), "try_attack 应成功（已清空 cd / 三段 / dash_t）"
+    seq, punch_zero_tick = [], None
+    for i in range(1, n + 1):
+        w.keys = set()
+        step_pure(dt, 1)
+        seq.append(_atk_drawn_idx())
+        if punch_zero_tick is None and l.punch <= 0.0:
+            punch_zero_tick = i
+    return seq, punch_zero_tick, l
+
+
+# ---- 判据 A：punch 41 tick 归零 + 峰值索引 7~8 + 源码 pingpong 守护 ----
+_src35 = open(os.path.join(HERE, "pet_engine", "night.py"), encoding="utf-8").read()
+_seqA35, _pzt35, _l35 = _atk_seq(n=45)
+_atkA35 = [x for x in _seqA35 if x is not None]
+chk("㉚-1 ⭐⭐⭐ PR35-v2 判据A：punch 由 _tick 唯一推进 ⇒ **41 tick 归零**"
+    "（0.67s 设计窗口；双减已除）；峰值索引 **7~8**（12fps×0.667s≈8 帧）；"
+    " 窗口内索引单调不减（上升段，见段首⚠️A）；源码含 pingpong 公式、"
+    " ⛔ 不含 `int(l.t * GAME_FPS[l.act])` 双乘",
+    _pzt35 == 41 and 7 <= max(_atkA35) <= 8
+    and all(b >= a for a, b in zip(_atkA35, _atkA35[1:]))
+    and "_k = _kr % (2 * _n - 2)" in _src35
+    and "int(l.t * GAME_FPS[l.act])" not in _src35,
+    f"punch 归零 tick={_pzt35}（期望 41） 峰值索引={max(_atkA35)}（期望 7~8）"
+    f" 窗口内帧序列={_atkA35[:20]}…"
+    f" pingpong公式在源码={'_k = _kr % (2 * _n - 2)' in _src35}"
+    f" 双乘已除={'int(l.t * GAME_FPS[l.act])' not in _src35}")
+
+# ---- 判据 A 阳性对照①：fps 回 24.0 ⇒ 峰值 15（完整挥出，非频闪，见段首⚠️B）----
+_a35_bak = (N.GAME_FPS.get("attack"), N.GAME_FPS.get("attack_charge"))
+try:
+    N.GAME_FPS["attack"] = N.GAME_FPS["attack_charge"] = 24.0
+    _seqB35, _pztB35, _lB35 = _atk_seq(n=45)
+finally:
+    N.GAME_FPS["attack"], N.GAME_FPS["attack_charge"] = _a35_bak
+_atkB35 = [x for x in _seqB35 if x is not None]
+chk("㉚-2 ⭐⭐ 判据A 阳性对照①：临时把 attack/attack_charge 改回 24.0 ⇒ 0.67s 推进"
+    " ~16.4 帧 ⇒ **峰值索引 15**（16 帧完整挥出+收回，与 12.0 的峰值 8 截然不同）"
+    " ——证明判据抓的是 fps 值，不是恒绿（跑完已还原 12.0）",
+    max(_atkB35) == 15 and _pztB35 == 41
+    and (N.GAME_FPS.get("attack"), N.GAME_FPS.get("attack_charge")) == (12.0, 12.0),
+    f"fps=24 时峰值={max(_atkB35)}（期望 15） punch 归零 tick={_pztB35}"
+    f" 还原后={N.GAME_FPS.get('attack')}/{N.GAME_FPS.get('attack_charge')}")
+
+# ---- 判据 A 阳性对照②：模拟「保留 Luna.update 递减」（双减）⇒ 21 tick 归零 ----
+# ⭐ 等价性：源码里删掉的正是 `if self.punch > 0.0: self.punch = max(0.0, self.punch - dt)`
+#   两行；wrapper 在 update 返回后执行同一行 = 行为等价（punch 是纯计时，顺序不影响总量）。
+#   ⛔ 没用「临时改 night.py 源码」方案：那会牵动全套其他段的 attack 相关判据、
+#   连带红难分清；monkeypatch 只影响本段这一跑，且 finally 保证还原。
+_orig_luna_update = N.Luna.update
+
+
+def _double_dec_update(self, dt, keys, room):
+    _orig_luna_update(self, dt, keys, room)
+    if self.punch > 0.0:
+        self.punch = max(0.0, self.punch - dt)
+
+
+try:
+    N.Luna.update = _double_dec_update
+    _seqC35, _pztC35, _lC35 = _atk_seq(n=45)
+finally:
+    N.Luna.update = _orig_luna_update
+_atkC35 = [x for x in _seqC35 if x is not None]
+chk("㉚-3 ⭐⭐ 判据A 阳性对照②：monkeypatch 在 Luna.update 后补减一次 punch"
+    "（= 精确复现「不删改动三」的双减）⇒ punch **21 tick 归零**、峰值 ≤5"
+    "（动画只播一半就被切回 idle）——证明判据抓的是双减产，不是恒绿",
+    _pztC35 == 21 and max(_atkC35) <= 5 and N.Luna.update is _orig_luna_update,
+    f"双减下 punch 归零 tick={_pztC35}（期望 21） 峰值={max(_atkC35)}（期望 ≤5）"
+    f" patch 已还原={N.Luna.update is _orig_luna_update}")
+
+# ---- 判据 B：常量守恒（真实值；dash=60 不被本单碰坏）----
+chk("㉚-4 ⭐⭐ PR35-v2 判据B：GAME_FPS attack/attack_charge==12.0 且 dash==60.0"
+    "（PR38 不被本单碰坏）、mw_walk/run_carry/mw_idle 不动；"
+    " ATK_WIND/ACT/REC 仍 0.16/0.09/0.42（红线）、ATK_CD 仍 0.12",
+    (N.GAME_FPS.get("attack"), N.GAME_FPS.get("attack_charge")) == (12.0, 12.0)
+    and N.GAME_FPS.get("dash") == 60.0
+    and (N.GAME_FPS.get("mw_walk"), N.GAME_FPS.get("run_carry"),
+         N.GAME_FPS.get("mw_idle")) == (12.0, 24.0, 8.0)
+    and (N.ATK_WIND, N.ATK_ACT, N.ATK_REC, N.ATK_CD) == (0.16, 0.09, 0.42, 0.12),
+    f"GAME_FPS={N.GAME_FPS} ATK=({N.ATK_WIND},{N.ATK_ACT},{N.ATK_REC},{N.ATK_CD})")
+
+# ---- 判据 B 阳性对照：内存态临时改 ATK_WIND ⇒ 判据B 必须报红 ----
+_wind_bak = N.ATK_WIND
+try:
+    N.ATK_WIND = 0.99
+    _wind_red = not ((N.ATK_WIND, N.ATK_ACT, N.ATK_REC, N.ATK_CD)
+                     == (0.16, 0.09, 0.42, 0.12))
+finally:
+    N.ATK_WIND = _wind_bak
+chk("㉚-5 ⭐⭐ 判据B 阳性对照：临时把 ATK_WIND 戳成 0.99 ⇒ 常量守恒条件必须变红"
+    "（证明判据B 读真实值、不是恒绿；跑完已还原 0.16）",
+    _wind_red and N.ATK_WIND == 0.16,
+    f"改后守恒条件为假={_wind_red} 还原后 ATK_WIND={N.ATK_WIND}")
+
+# ---- 数学关系判据（与守护判据分开写，见用户级记忆铁律）----
+# ⚠️ 本条**自设** kr 序列过公式，测的是「公式的数学关系是 pingpong」，
+#   ⛔ 不守护「源码真改了没有」——那件事由 ㉘-1 的源码断言守护。
+# ⚠️⚠️ 序列必须按**一个完整周期**取（GP03 教训：接缝要量循环首尾，取样长度
+#   不是周期整数倍 ⇒ 末项落在下一周期中段，量出的「接缝」无意义）：
+#   pingpong 周期 = 2n-2 = 30 项；cycle 周期 = n = 16 项。
+_n35 = 16
+_pingpong = []
+for _kr in range(2 * _n35 - 2):            # 0..29 = pingpong 一个完整周期
+    _k = _kr % (2 * _n35 - 2) if _n35 > 1 else 0
+    if _k >= _n35:
+        _k = 2 * _n35 - 2 - _k
+    _pingpong.append(_k)
+_cycle = [_kr % _n35 for _kr in range(_n35)]   # 0..15 = cycle 一个完整周期
+chk("㉚-6 ⭐ 数学关系判据（⛔ 不守护源码，只验证公式语义）：改动二的公式作用于"
+    " 16 帧 ⇒ 一个完整周期首尾接缝 abs(seq[-1]-seq[0])==**1**（pingpong 无缝）；"
+    " 对照 cycle 公式接缝==**15**（末帧 15 硬跳回首帧 0）——证明公式确实是 pingpong",
+    abs(_pingpong[-1] - _pingpong[0]) == 1 and abs(_cycle[-1] - _cycle[0]) == 15
+    and _pingpong[:17] == list(range(16)) + [14] and len(_pingpong) == 30,
+    f"pingpong 全周期(30项)={_pingpong} 接缝={abs(_pingpong[-1] - _pingpong[0])}"
+    f" cycle 全周期(16项)首尾={_cycle[0]}/{_cycle[-1]} 接缝={abs(_cycle[-1] - _cycle[0])}")
+
+print("=" * 72)
+print("㉚ PR35-v2 段完成：本段 6 条（2 判据 + 3 阳性对照 + 1 数学关系判据）")
+print("=" * 72)
+
+# ============================================================================
+# ⭐⭐ 2026-10-14：本文件尾部（:1281 起）的各段排在 :1288 那条汇总**之后**、
+#   而且全文从来没有 sys.exit ⇒ **尾部判据跑红也不会让套件失败**（静默通过），
+#   `_自测_全部.py` 只看退出码 + 汇总行 ⇒ 永远看到 147/147✅。
+#   ⇒ 在**文件真正末尾**补一条真汇总 + 退出码，让尾部 ㉕/㉖/㉗/㉘ 段能被看见。
+#   ⛔ 没有改动任何既有判据、⛔ 没有改任何阈值 —— 只是把 OK/BAD 如实报出去。
+# ============================================================================
+print("=" * 72)
+print(f"通过 {len(OK)} / {len(OK) + len(BAD)}"
+      f"   （含文件尾部 ㉕/㉖/㉗/㉘ 各段；:1288 那条只数到它之前）")
+if BAD:
+    print(f"❌ 未通过 {len(BAD)} 条：")
+    for _bn in BAD:
+        print("   ·", _bn)
+print("=" * 72)
+sys.exit(1 if BAD else 0)

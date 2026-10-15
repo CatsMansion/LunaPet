@@ -36,8 +36,11 @@
 
 ```bat
 cd /d 自研引擎
-"C:\Users\mercy\.workbuddy\binaries\python\envs\default\Scripts\python.exe" -m PyInstaller --noconfirm --clean LunaPet.spec
+<VENV_PY> -m PyInstaller --noconfirm --clean LunaPet.spec
 ```
+
+> `<VENV_PY>` = 带 PySide6 的那个 venv python 解释器。⛔ 不要把它的绝对路径写进本文件 ——
+> 本文档会进公仓，含 `C:/Users/<user>` 的硬编码路径会被发布前内容闸门拦下。
 
 > ⚠️ 重打前如果 `dist\LunaPet` 已存在，PyInstaller 会先删掉它。
 > 如果被占用（比如宠物还开着），先退出宠物再打。

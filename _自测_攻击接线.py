@@ -105,10 +105,17 @@ section("⑮·PR15 · attack 槽接线（派单 §四判据）")
 # ============================================================================
 
 # ---- 判据 1：GAME_FPS ----
-_ok1 = (abs(N.GAME_FPS.get("attack", 0) - 24.0) < 1e-9
-        and abs(N.GAME_FPS.get("attack_charge", 0) - 24.0) < 1e-9
+# ⭐⭐ 2026-10-15 PR35-v2（Ronny 拍板 #7 全按推荐 B）：attack/attack_charge
+#   **24.0 → 12.0**。旧 24.0 配旧取帧 `int(l.t * GAME_FPS)` = fps 乘两次
+#   ⇒ 576 步/秒 = 36 轮/秒频闪；修法 = fps 减半 + 取帧改 pingpong（night.py:6426），
+#   0.67s 窗口内挥出到 f7/f8 即收（AC01「宁可慢不要快」）。
+#   ⛔ 本条原为 PR15 快照值 24.0；按拍板更新为 12.0，⛔ 不是为凑绿削判据 ——
+#   值再被偷偷改回去（或改成别的数）本条照样红。pingpong 语义由
+#   `_自测_夜间.py` ㉚ 段守护。
+_ok1 = (abs(N.GAME_FPS.get("attack", 0) - 12.0) < 1e-9
+        and abs(N.GAME_FPS.get("attack_charge", 0) - 12.0) < 1e-9
         and "tease" not in N.GAME_FPS)
-chk("⑮-1 ⭐ GAME_FPS 含 attack/attack_charge=24.0，⛔ 不含 tease", _ok1,
+chk("⑮-1 ⭐ GAME_FPS 含 attack/attack_charge=12.0（PR35-v2 拍板值），⛔ 不含 tease", _ok1,
     "GAME_FPS=%s" % (N.GAME_FPS,))
 # ⭐⭐ 阳性对照：只查「值对」不够，还要证明"tease 真的被删了"这件事判据认得出
 _src = open(os.path.join(HERE, "pet_engine", "night.py"), encoding="utf-8").read()
@@ -323,15 +330,19 @@ _a_atk = l9.pick_action()
 #   实测：空手冲刺 = human_run（run_carry 只用于负重跑，Ronny 10-04 划过）。
 #   ⛔ 我第一版把期望写成 run_carry ⇒ 判据红 ⇒ 查下来**产品代码本来就是这样**，
 #     是判据记错了既有行为。
+# ⭐⭐ 2026-10-15 PR38（AC03 选 D）：空手冲刺从 human_run 改为 **dash**
+#   （dash 素材落盘后走游戏帧；未落盘时静默落桌宠分支，不崩）。
+#   ⛔ 本条按派单授权更新期望值，⛔ 不是为凑绿削判据 —— 若有人把 dash 偷改回
+#   human_run（或别的），本条照样红。dash 取帧/0.2s 窗口由 `_自测_夜间.py` ㉙ 段守护。
 _ok9 = (_a_walk == "human_run" and _a_climb == "climb"
-        and _a_dash == "human_run" and _a_carry == "run_carry"
+        and _a_dash == "dash" and _a_carry == "run_carry"
         and _a_atk == "attack")
-chk("⑮-9 ⭐⭐ 默认行为回归：走/爬/冲刺/拿东西 四个动作 pick_action 逐字未变", _ok9,
-    # ⭐ 手空冲刺的既有行为是 **human_run**（⛔ 不是 run_carry——
-#   run_carry 是负重跑素材，Ronny 10-04 划过「拿东西时不用 run_carry 播冲刺」）。
-#   我第一版期望写成 run_carry ⇒ 判据红 ⇒ **判据错了，产品代码是对的**。
+chk("⑮-9 ⭐⭐ 默认行为回归：走/爬/冲刺/拿东西 四个动作 pick_action 与拍板值一致"
+    "（冲刺=dash 为 PR38 授权新值）", _ok9,
+    # ⭐ 空手冲刺的拍板行为是 **dash**（PR38；此前是 human_run，⛔ 不是 run_carry ——
+    #   run_carry 是负重跑素材，Ronny 10-04 划过「拿东西时不用 run_carry 播冲刺」）。
     "走=%s 爬=%s 空手冲刺=%s 负重跑=%s挥击=%s"
-    "（期望 human_run/climb/human_run/run_carry/attack）"
+    "（期望 human_run/climb/dash/run_carry/attack）"
     % (_a_walk, _a_climb, _a_dash, _a_carry, _a_atk))
 # ⭐⭐ 阳性对照：跑动时按攻击 ⇒ 必须切成 attack（证明不是"永远返回前者"）
 w9b = reset(new_w())

@@ -425,6 +425,9 @@ class Pet:
         self.mood = 50.0
         self.goal = None               # "goto" | "seek" | None
         self.goal_x = 0.0
+        # ⭐⭐ 2026-10-14 PR-桌宠游戏姿态（Ronny：「游戏窗口打开时，露娜走到屏幕右下角播打游戏」）
+        self._game_act = None          # 游戏姿态要播的动作名（None = 没在游戏姿态）
+        self._game_arrived = False     # 是否已到角落（False = 还在路上 / 被拎走后要重走）
         self._pat_t = 0.0              # 被摸剩余时间
         self._cursor_x = None          # 最近一次光标位置（由 UI 喂进来）
         # ⭐⭐ 2026-09-30 光标唤醒改【边沿触发】：记上一帧光标在不在 wake_radius 内。
@@ -635,6 +638,12 @@ class Pet:
            两处的收尾动作必须一致，所以合并成一个。
         """
         self.goal = None
+        # ⭐⭐ 2026-10-14 游戏姿态：到角了 → 坐下打游戏，⛔ 不回 idle（留在原地循环播）
+        if self._game_act and self._has(self._game_act):
+            self._game_arrived = True
+            self.play(self._game_act)
+            self.state = self._game_act
+            return
         if self.state == "walk" and self._has("turn_out"):
             self.play("turn_out")     # 播完由 step() 接 idle + 重设 state_timer
         else:
@@ -652,6 +661,20 @@ class Pet:
            ① **无论如何都重设 state_timer**（保证不会每帧重入）
            ② 只在【从非走路状态进入走路】时才考虑换向，且只以 `turn_chance` 的概率翻
         """
+        # ⭐⭐ 2026-10-14 游戏姿态优先：整个游戏期间**不许挑随机漫游目标**。
+        #   ⛔ 不挡的话 `_pick_goal()` 会把目的地顶成随机点 ⇒ 她掉头走反方向
+        #      （与 step() 里 `goal == "seek"` 的处置同一个道理）。
+        if self._game_act and self._has(self._game_act):
+            if self._game_arrived:
+                self.play(self._game_act)
+                self.state = self._game_act      # 站定循环播
+            else:
+                self.goal = "goto"
+                self.goal_x = self._game_go_x()
+                self.facing_right = self.goal_x > self.body.x
+                self.play_walk()
+                self.state_timer = random.uniform(*self.behaviour.walk_duration)
+            return
         b = self.behaviour
         _loc = self._loco_act()
         if random.random() < b.walk_weight and _loc in self.pack.actions:
@@ -743,6 +766,15 @@ class Pet:
             return False
         # ⭐ 爬完一次歇一会儿（ladder 到顶掉下来后不再立刻爬，见 step 的到顶分支）
         if getattr(self, "_climb_cool", 0.0) > 0.0:
+            return False
+        # ⭐⭐ 2026-10-14 游戏姿态期间**不爬墙**。
+        #   ⛔ 病根：`pet.json` 的 `terrain`（单数！）把**屏幕左右两侧**都配成了 `ladder`
+        #      （右墙 x0=-70 / x1="right" / climb_reach=90，见 `_terrain说明`）⇒
+        #      她往右下角走，一贴近右限位（实测 x≈640）就落进爬升容差 ⇒ 被拽去爬墙 ⇒
+        #      `state` 变 climb、画出来的是 climb 帧，**永远坐不下来**
+        #      （实测 2026-10-14：`_自测_桌宠游戏姿态.py` ㉙-1 第一次跑就是这么红的）。
+        #   ⭐ 与 INTERACT_STATES 同一类处置：**系统指定的姿态期间，不被地形打断**。
+        if self._game_act:
             return False
         if self.state in ("climb", "fall", "land", "land_settle",
                           "drag", "drag_in", "drag_out") or self.state in INTERACT_STATES:
@@ -939,6 +971,63 @@ class Pet:
         self.excited = bool(on)
         if not self.excited and self.anim and self.anim.act.name == "run":
             self.play_walk()
+
+    # ---------- ⭐⭐ 游戏姿态（2026-10-14 Ronny：开游戏窗 → 走到屏幕右下角打游戏）----------
+    def _game_go_x(self) -> float:
+        """游戏姿态的目的地 x = 屏幕右缘**之外**（可达范围外）。
+
+        ⭐ 故意设在够不到的地方 —— 她会被 `clamp_to_screen` 挡在右限位，
+          而 `step()` 里**已有**「被挡回 + 目标还在同侧 ⇒ 认作到站 → `_arrive()`」的判定
+          （见 step() 的 blocked_left/blocked_right 那段，注释写的是给 seek 用的）。
+        ⛔ 不自己算 `sr - 轮廓右缘`：轮廓随动作变，`clamp_to_screen` 才是唯一真源。
+        """
+        try:
+            return float(self.screen[2]) + 200.0
+        except (IndexError, TypeError, ValueError):
+            return self.body.x
+
+    def go_and_play(self, act: str) -> None:
+        """⭐ 让露娜**自己走到屏幕右下角**，到了之后循环播 `act`（打游戏）。
+
+        ⭐ 复用现有目标导向走动（`_pick_goal` / `_goal_reached` / `_arrive`），⛔ 不另写位移。
+        ⛔ 没这个动作的帧就**别去** —— 桌宠侧 `ui.paintEvent` 找不到动作是**直接 return**
+           （屏幕上什么都没有），比游戏侧那种"静默画 idle"更难看。
+        """
+        if not self._has(act):
+            return
+        # ⛔ 顺序要紧：`wake()` 内部会 `self.goal = None` ⇒ 必须先叫醒、后设目标。
+        if self.asleep or self._wake_stage > 0 or self.state in ("sleep_in", "sleep_loop"):
+            self.wake("game")
+        # ⚠️ 若她此刻**正卡在爬墙**（屏幕右缘在 pet.json 里就是一条 ladder）⇒
+        #   借 step() 已有的「冷却期放弃这次攀爬」分支（那段本来是为 `brush` 交互写的，
+        #   见 step() 的 `if self.state == "climb"` 里 `_climb_cool` 那两个分支）先下来。
+        #   ⛔ 不借的话：她在墙上时设的目标要等**爬到顶跳走之后**才生效，
+        #      "开游戏窗 ⇒ 走过去坐下"就变成"先爬一趟墙再说"。
+        self._climb_cool = max(getattr(self, "_climb_cool", 0.0), 1.0)
+        self._game_act = act
+        self._game_arrived = False
+        self.goal = "goto"
+        self.goal_x = self._game_go_x()
+        self.facing_right = self.goal_x > self.body.x
+        if self._goal_reached():
+            self._arrive()
+        elif self.state != "walk":
+            self.play_walk()
+
+    def end_game_act(self) -> None:
+        """⭐ 游戏窗关了 → 结束游戏姿态，回到正常漫游。"""
+        if self._game_act is None:
+            return
+        act = self._game_act
+        self._game_act = None
+        self._game_arrived = False
+        if self.state == act:
+            # 正在角落里坐着玩 → 站起来，交回正常状态机
+            self.play("idle")
+            self.state = "idle"
+            self.state_timer = random.uniform(*self.behaviour.idle_duration)
+        elif self.goal == "goto":
+            self.goal = None       # 还没走到 → 目的地作废
 
     # ---------- 物理 ----------
     def update(self, dt: float):
@@ -1444,6 +1533,8 @@ class Pet:
         #   （⛔ 不清的话，松手后目标还在，update() 会立刻 play("walk") 把 fall 顶掉）
         self.goal = None
         self.dragging = True
+        # ⭐⭐ 2026-10-14：被拎走 ⇒ 游戏姿态的「已到角」作废 ⇒ 松手后她自己走回右下角
+        self._game_arrived = False
         # ⭐ 被拎起来 → 睡眠状态与计时全部作废
         self.asleep = False
         self._sleep_t = 0.0

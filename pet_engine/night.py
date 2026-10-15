@@ -1270,9 +1270,12 @@ GAME_ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 #     不是数值没调好（详见 `_draw_luna` 里 attack 分支的注释）。
 #   ⛔ 原来那段「15fps 是为 8 个攻击姿态」的注释（PR15 前）已随 tease 一起失效，
 #     **已删除** —— 留着会误导下一个读代码的人去给桌宠动作调 fps。
-#   ⭐ attack / attack_charge 都是 24.0 = 16 帧 / 0.667s，与 run_carry 同节奏。
+#   ⭐ attack / attack_charge 都是 12.0 = 16 帧 pingpong，0.667s 窗口内挥出再收回
+#     （PR35-v2：原 24.0 配取帧 `int(l.t * GAME_FPS)` = fps 乘两次 ⇒ 576 步/秒
+#      = 36 轮/秒频闪；修法 = fps 减半 + 取帧改 pingpong，与 run_carry :6380 同形态）。
 GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0,
-            "attack": 24.0, "attack_charge": 24.0,
+            "attack": 12.0, "attack_charge": 12.0,
+            "dash": 60.0,                 # ⭐ PR38：12帧素材在0.2s窗口以双倍速播完（AC03 选 D）
             "mw_idle": 8.0}      # ⭐ PR31-A：patrol 原地警戒，裁定 §6 定 8fps
 # ⭐ 素材的**原始朝向**（+1 朝右 / -1 朝左），实测自素材本身，不是猜的：
 #   mw_walk 素材朝左（能看到侧脸和制服前襟，尾巴在右后）→ -1
@@ -1282,6 +1285,7 @@ GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0,
 #   微波炉素材朝左，所以它 face=1（该朝右）时**没被镜像**，等于拿屁股对着玩家（Ronny 实机反馈）。
 #   ✅ 改成"和素材原始朝向不一致才镜像"，两套素材共用一条规则。
 GAME_SRC_FACE = {"mw_walk": -1, "run_carry": 1, "attack": 1, "attack_charge": 1,
+                 "dash": 1,                     # ⭐ PR38：冲刺素材暂定朝右（同 attack/run_carry，待 Ronny 目视确认）
                  "mw_idle": -1}  # ⭐ PR31-A：假设同 mw_walk 朝左；待目视确认
 
 # ⭐⭐ PR36：桌宠 pack 分支的源朝向表（设计端 2026-10-13 纯目视实测 25 动作）。
@@ -1635,11 +1639,10 @@ class Luna:
         elif self.atk_rec > 0.0:
             self.vx *= 0.86            # 后摇几乎还能动一点（不至于完全僵住）
         # ⭐ punch 只是"播挥击动作（attack / attack_charge）"的计时，与三段并行递减
-        #   （它没有阶段转移，所以放在这里减是对的）。
-        #   ⛔ 别把 punch 当攻击计时用 —— 它是表现层。
-        #   ⚠️ PR15：原文写的是「播 tease」，tease 已下线（只在桌宠里）⇒ 已更正。
-        if self.punch > 0.0:
-            self.punch = max(0.0, self.punch - dt)
+        #   ⛔⛔ PR35-v2：递减**只由窗口层 _tick 推进**（:4867-4868，与 wind/act/rec 同一机制，
+        #     唯一裁判）；这里曾也减一次 ⇒ 每 tick 掉 2×dt ⇒ 窗口 0.35s（设计值一半），
+        #     动画只播 1/3 就被 pick_action 切回 idle。实测：双减下 punch 21 tick 归零、
+        #     三段 41 tick 归零。can_attack 门禁不看 punch ⇒ 修它不变长输入锁。
 
         # --- 梯子 ---
         lad = self._ladder_here(room)
@@ -1985,7 +1988,7 @@ class Luna:
         #   ⛔ 拿东西时**不**用 run_carry 播冲刺：那素材肩上有东西的姿势，
         #     冲刺是无负重爆发，混用会让"冲刺"看起来像"负重快跑"。
         if self.dash_t > 0.0:
-            return "run_carry" if self.carrying else "human_run"
+            return "run_carry" if self.carrying else "dash"   # ⭐ PR38：空手冲刺走 dash 素材；拿东西仍是 run_carry（带赃物图标）
         if self.on_ladder:
             return "climb"
         if not self.on_ground:
@@ -6412,14 +6415,19 @@ class NightWindow(QWidget):
         #   ① 必须 return —— ⛔ 不许落回桌宠分支（那才是"大小又复发"的直接原因）
         #   ② 帧列表为空时 **print 告警** —— ⛔ 不许静默兜底画 idle
         #      （同一个坑不能踩第二次：tease 那次就是静默兜底了整整两轮）
-        #   ③ 用 `GAME_FPS[l.act]` 查表，⛔ 不写死帧率
+        #   ③ 帧率仍走 `GAME_FPS[l.act]` 查表（:5037 推进 l.t）；取帧用 `int(l.t)`
+        #      pingpong（⭐ PR35-v2），⛔ 不再乘 fps（fps² 频闪，同 run_carry :6380）
         if l.act in ("attack", "attack_charge"):
             _af = self.gframes.get(l.act) or []
             if not _af:
                 # ⛔⛔ 静默兜底 = Ronny 实机看到"攻击没动画"，而代码"看起来没问题"
                 print("[夜间] ⚠️ 游戏帧缺 %s（大小会回退成桌宠比例）" % l.act)
             else:
-                _k = int(l.t * GAME_FPS[l.act]) % len(_af)
+                _kr = int(l.t)                      # ⭐ PR35-v2：去掉双乘（l.t 已是帧单位，见 run_carry :6380）
+                _n = len(_af)
+                _k = _kr % (2 * _n - 2) if _n > 1 else 0
+                if _k >= _n:
+                    _k = 2 * _n - 2 - _k
                 _pm, _cw, _ch, _ax, _ay = _af[_k]
                 p.save()
                 p.translate(l.x, l.y)
@@ -6435,6 +6443,22 @@ class NightWindow(QWidget):
                         p.drawImage(QRectF(l.x - 9 + i * 18, l.y - 118 - i * 6,
                                             18, 18), ic, QRectF(0, 0, ic.width(), ic.height()))
                 return
+        # ============ PR38 · dash 走游戏帧（K / 右键冲刺） ============
+        if l.act == "dash":
+            _df = self.gframes.get("dash") or []
+            if _df:
+                _k = int(l.t) % len(_df)          # ⭐ PR38：l.t 已是帧单位（:5049），⛔ 别乘 GAME_FPS（fps² 坑，见 run_carry :6380）
+                _pm, _cw, _ch, _ax, _ay = _df[_k]
+                p.save()
+                p.translate(l.x, l.y)
+                if l.face != GAME_SRC_FACE["dash"]:
+                    p.scale(-1.0, 1.0)
+                p.drawImage(QRectF(-_ax, -_ay, _cw, _ch), _pm, QRectF(0, 0, _cw, _ch))
+                p.restore()
+                return
+            else:
+                # ⛔ 帧缺失：告警后落回桌宠分支（与 run_carry/attack 既有模式一致；不静默画 idle 不崩）
+                print("[夜间] ⚠️ 游戏帧缺 dash（大小会回退成桌宠比例）")
         imgs = self.imgs.get(l.act) or self.imgs["idle"]
         act = self.pack.actions.get(l.act) or self.pack.actions["idle"]
         cw, ch = self.pack.canvas_of(l.act)
