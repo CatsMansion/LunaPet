@@ -159,7 +159,9 @@ OK, BAD = [], []
 #   下面这些是旧布局（470/320/552/700）的替身，新布局见 night.py 的 PLATFORMS/LADDERS。
 FLOOR   = N.FLOOR_Y          # 672
 COUNTER = N.PLATFORMS[2][1] # 料理台顶 375
-TABLE   = N.PLATFORMS[1][1] # 餐桌顶 474
+TABLE   = N.PLATFORMS[1][1] # 餐桌顶 488（⛔ 旧注释写 474 是过期值：night.py:175
+                            #   `TABLE_TOP = 488`；同文件 :249 `_drop_table = 108`
+                            #   = 488-380 也只对了这个值，474-380=94 对不上）
 HANGER  = N.PLATFORMS[3][1] # 吊柜顶 177
 LADX    = N.LADDERS[0][0]    # 梯子 x 620
 LADTOP  = N.PLATFORMS[2][1] # 梯子顶 = 料理台 375
@@ -2017,13 +2019,12 @@ w._last = None
 from PySide6.QtGui import QImage   # ⭐ PR38 判据注入假帧用（文件头只导了 QPixmap）
 
 
-# ⚠️⚠️ 既有 bug（2026-10-15 探针 `_pr38_probe.py` 实锤，⛔ 本单不修、待 Ronny 拍板）：
-#   `Luna.update` dash 分支（night.py:1600-1609）起手时 `vy += GRAVITY*dt*0.35`
-#   ⇒ y 必超 FLOOR_Y ⇒ `if self.y >= FLOOR_Y: ... self.dash_t = 0.0`（:1607-1609
-#   「落地即结束」）在**地面起手第一帧**就命中 ⇒ dash_t 归零、只剩 ~10px 位移。
-#   ⇒ 真机站地上按 K 冲刺无效（设计意图 620px/s×0.2s=124px 完全没体现）。
-#   ⛔ PR38 派单红线「四常量全不动」且落地逻辑不在授权范围 ⇒ 本单只接线不修它；
-#   ⇒ 判据 A 用**起手高度 FLOOR_Y-30**（空中起手，24 帧内落不回地面）绕过，
+# ⭐ 历史记录（2026-10-15 探针 `_pr38_probe.py` 实锤；⛔ 已于 PR40 修复，Ronny 拍板 A）：
+#   `Luna.update` dash 分支起手时 `vy += GRAVITY*dt*0.35` ⇒ y 必超 FLOOR_Y
+#   ⇒ 旧版「落地即结束」无条件下把**地面起手**也在第一帧掐掉 ⇒ 只剩 ~10px（设计 124px）。
+#   ✅ 修法：起手 snapshot `dash_from_air`（见 try_dash），落地即结束只判【空中起手】。
+#   ⇒ 本判据起手高度 FLOOR_Y-30 = 空中起手 ⇒ 落地才结束，验证「取帧公式 + 0.2s 窗口」接线。
+#   ⇒ 判据 A 用**起手高度 FLOOR_Y-30**（空中起手 ⇒ 落地才结束，PR40 修复后的既有语义），
 #     验证的是「取帧公式 + 0.2s 窗口」这条接线，⛔ 不守护也不固化这个 bug。
 # ⚠️ dt 兜底（night.py:4835）：`_tick` 第一帧 dt=0.016（`_last is None`），
 #   之后才是我喂的 1/120 ⇒ 判据不断言精确帧数（对兜底不敏感），
@@ -2077,7 +2078,7 @@ def _dash_seq(n=24, dt=1.0 / 120.0):
 
     ⭐ dt 取 1/120：60fps 下 l.t 每帧 +1.0，k 从 1 起跳；1/120 每帧 +0.5，
       0.2s 内 k=0~11 每个都有驻留帧（第一帧 dt 走 0.016 兜底，见段首说明）。
-    ⭐ 起手 y=FLOOR_Y-30：绕过既有「地面起手被落地即结束掐断」bug（段首已论证），
+    ⭐ 起手 y=FLOOR_Y-30：空中起手 ⇒ 落地结束（PR40 修复后此为既有语义，不再是绕过），
       24 帧内 vy 累积位移 ~13px，落不回 FLOOR_Y ⇒ dash_t 不被误掐。
     ⛔ 不造盘上素材：只往内存 gframes 注入（调用方负责注入/还原）。
     """
@@ -2118,7 +2119,7 @@ _dashA = [x for x in _seqA if x is not None]
 chk("㉙-1 ⭐⭐⭐ PR38 判据A：真触发 dash 后 `_draw_luna` 画出的**确实是 dash 游戏帧**"
     "（按 QImage 对象身份反查），且 0.2s 窗口内 12 帧素材 **0→11 全部播到**"
     "（GAME_FPS['dash']=60 双倍速）；窗口结束（dash_t 归零）后不再画 dash 帧、"
-    " `l.act` 回落到 idle〔起手高度 FLOOR_Y-30 绕过既有落地 bug，见段首〕",
+    " `l.act` 回落到 idle〔空中起手 ⇒ 落地结束，PR40 修复后的既有语义〕",
     set(_dashA) == set(range(12)) and len(_dashA) >= 20
     and _seqA[-1] is None and _lA.act == "idle",
     f"画出 dash 帧 {len(_dashA)}/24 帧 索引集合={sorted(set(_dashA))}"
@@ -2389,15 +2390,293 @@ print("㉚ PR35-v2 段完成：本段 6 条（2 判据 + 3 阳性对照 + 1 数�
 print("=" * 72)
 
 # ============================================================================
+# ⭐⭐ 2026-10-15 · ㉛ PR40 段：dash 落地判定修复（Ronny 拍板 A）
+#
+#   背景（PR38 §七 回报、Ronny 拍板修的既有真 bug）：地面起手（y=FLOOR_Y, vy=0）
+#   第一帧 `vy += GRAVITY*dt*0.35` ⇒ y 必超 FLOOR_Y ⇒ 旧落地判定
+#   `if self.y >= FLOOR_Y: … dash_t = 0` 在**地面起手第一帧**就命中
+#   ⇒ dash_t 归零、只滑 ~10px（设计意图 620×0.2=124px 完全没体现，
+#     「冲刺比 RUN 快一倍」形同虚设）。注释「落地即结束（冲刺是地面技）」
+#   的本意是「腾空后落地才结束」，实现把「地面起手」也掐了 —— 意图与实现矛盾。
+#
+#   修法（拍板 A，⛔ 只做 A / 不碰 B/C）：try_dash 起手瞬间 snapshot
+#   `self.dash_from_air = not self.on_ground`；落地判定改
+#   `if self.y >= FLOOR_Y and self.dash_from_air:`。
+#   ⇒ 空中起手落地才结束（语义不变）；地面起手滑完整个 0.2s
+#     （y 仍每帧钳回 FLOOR_Y，沿地板滑 —— ⛔ 钳位没删）。
+#
+#   ⛔ 本段阳性对照全部走**内存态**（属性赋值 / 模块常量赋值 + finally 还原），
+#     ⛔ 不临时改 night.py 源码（派单红线 #6；源码级回退对照由设计端验收时
+#     自己走「cp→改→跑→复原→md5」五步）。退出码级证据见 `_pr40_probe.py`。
+#   ⛔ DASH 四常量 / ATK 四常量一个字节没动（㉛-1 守护）。
+# ============================================================================
+import re
+import ast as _ast
+
+# ---- 物理夹具：真触发一次 dash，驱动 n 帧真 `_tick`，逐帧记录 ----
+# ⭐ 与 ㉙ `_dash_seq` 同款：清状态 + step_pure（冻微波炉、防 escort 泄漏，
+#   见 step_pure docstring 的 PR37-v2 教训）+ 内存注入 12 张假 QImage
+#   （派单要求「按 PR38 判据 A 同款夹具」；⛔ 不落盘、跑完还原）。
+_dash_fake40 = [(QImage(48, 64, QImage.Format_ARGB32), 48, 64, 24, 64)
+                for _ in range(12)]
+
+
+def _dash_phys_run(n=24, dt=1.0 / 120.0, y0=None, vy0=0.0, on_ground=True,
+                   from_air=None, dash_speed=None):
+    """真触发一次 dash 并驱动 n 帧真 `_tick`；返回 (dx, dash_t_trace, y_trace, l)。
+
+    ⭐ 默认场景 = PR40 修复对象：地面起手 y=FLOOR_Y, vy=0, on_ground=True。
+    ⭐ from_air：None = 用 try_dash 真实 snapshot；True = 内存态覆盖成
+      「空中起手」（阳性对照①，复现修复前的掐断行为）。
+    ⭐ dash_speed：None = 真实 620.0；其他值 = 内存态覆盖（阳性对照②）。
+    ⛔ 两个覆盖都在 finally 里还原（属性 / 模块常量），不泄漏到后续判据。
+    """
+    w.start_night(0)
+    w.mode = "play"
+    l = w.luna
+    # 清掉所有会挡住 try_dash / 干扰物理的状态（同 ㉙ _dash_seq）
+    l.carrying = []
+    l.escort = False
+    l.charging = False
+    l.punch = 0.0
+    l.atk_cd = l.atk_wind = l.atk_act = l.atk_rec = 0.0
+    l.dash_t = l.dash_i = l.dash_cd = 0.0
+    l.x = 500.0
+    l.y = N.FLOOR_Y if y0 is None else float(y0)
+    l.vx, l.vy = 0.0, float(vy0)
+    l.on_ground = on_ground
+    l.act, l.t = "idle", 0.0
+    assert l.try_dash(1), "try_dash 应成功（已清空 cd / 三段 / dash_t）"
+    _fa_real = l.dash_from_air
+    _spd_real = N.DASH_SPEED
+    if from_air is not None:
+        l.dash_from_air = from_air          # 内存态覆盖（仅阳性对照①）
+    if dash_speed is not None:
+        N.DASH_SPEED = dash_speed           # 内存态覆盖（仅阳性对照②）
+    _gf_native = w.gframes.get("dash")
+    w.gframes["dash"] = _dash_fake40        # PR38 判据A 同款假帧（本段不测绘制）
+    x0 = l.x
+    t_trace, y_trace = [], []
+    try:
+        for _ in range(n):
+            w.keys = set()
+            step_pure(dt, 1)
+            t_trace.append(l.dash_t)
+            y_trace.append(l.y)
+    finally:
+        w.gframes["dash"] = _gf_native
+        l.dash_from_air = _fa_real          # 还原（阳性对照①）
+        N.DASH_SPEED = _spd_real            # 还原（阳性对照②）
+    return l.x - x0, t_trace, y_trace, l
+
+
+# ---- ㉛-1 守护判据（本段第一条断言；它之前本段没有任何对被守护量的赋值）----
+# ⚠️「全文件第一条断言」在本文件的落地口径 = **本段第一条 chk** + 本段它之前
+#   没有对 DASH_*/ATK_* 的任何赋值；更早的阳性对照（㉘-5 临时 ATK_WIND=0.99）
+#   已在 finally 还原，本条直接断言真实值兜底（GP04v3 恒绿教训：
+#   ⛔ 不自设值再比，必须读模块实际值）。
+# ⚠️⚠️ 派单原文「grep 行号落在 1936~1959 区间」与派单自己的改动自相矛盾：
+#   改动 1 在 :1562 后插 3 行、C1 在 :1273 插 1 行 ⇒ try_dash 整体下移，
+#   写死区间会被自己的插入撞出界 ⇒ 改用 **ast 动态定位函数体**（回执已报备）。
+_night_src40 = open(os.path.abspath(N.__file__), encoding="utf-8").read()
+_cl40 = [ln.split("#", 1)[0] for ln in _night_src40.splitlines()]   # 剥注释的代码行
+_tree40 = _ast.parse(_night_src40)
+
+
+def _fn40(name):
+    for _nd in _ast.walk(_tree40):
+        if isinstance(_nd, _ast.FunctionDef) and _nd.name == name:
+            return _nd
+    return None
+
+
+def _assigns40(fn, attr):
+    """fn 函数体里是否有 `self.<attr> = ...` 赋值。"""
+    if fn is None:
+        return False
+    for _st in fn.body:
+        for _sub in _ast.walk(_st):
+            if isinstance(_sub, _ast.Assign):
+                for _t in _sub.targets:
+                    if isinstance(_t, _ast.Attribute) and _t.attr == attr:
+                        return True
+    return False
+
+
+_asn_in_try_dash = _assigns40(_fn40("try_dash"), "dash_from_air")
+_asn_in_init = _assigns40(_fn40("__init__"), "dash_from_air")
+_asn_line40 = next((i + 1 for i, ln in enumerate(_cl40)
+                    if re.search(r"self\.dash_from_air\s*=\s*not\s+self\.on_ground", ln)),
+                   None)
+# ⚠️⚠️ 派单原文「③ :1609 落地条件含 `and self.dash_from_air`」同样与派单自己的
+#   文字要求矛盾：钳位在 if 块内，给 if 加条件会把钳位一起关掉 ⇒ 地面起手
+#   0.2s 内陷下去 ~14.6px（㉛-2 的 y 断言实测抓到）。按派单文字要求
+#   （「⛔ 不许删 y/vy 钳位，地面起手每帧仍要钳回地板」）实现为
+#   **钳位无条件 + 结束有条件** ⇒ 守护断言同步改为结构匹配（回执已报备）：
+_cond_land40 = re.search(
+    r"if self\.y >= FLOOR_Y:\s*\n"
+    r"(?:\s*#[^\n]*\n)*"
+    r"\s*self\.y, self\.vy = FLOOR_Y, 0\.0\s*\n"
+    r"\s*if self\.dash_from_air:\s*\n"
+    r"\s*self\.dash_t = 0\.0",
+    _night_src40) is not None
+chk("㉛-1 ⭐⭐⭐ PR40 守护判据（读 night.py 源码文本 + import 进来的真实值，"
+    " ⛔ 不自设值）：① `self.dash_from_air = not self.on_ground` 在 `try_dash` "
+    "函数体内（ast 动态定位，⛔ 不依赖行号）；② `self.dash_from_air = False` "
+    "在 `__init__`；③ 落地段结构 = 「`if self.y >= FLOOR_Y:` ⇒ y/vy 钳位（无条件）"
+    " ⇒ `if self.dash_from_air:` 才 `dash_t = 0.0`」（钳位不许被条件关掉，"
+    "见上方 ⚠️⚠️）；④ DASH_TIME/SPEED/INV/CD == 0.20/620.0/0.26/1.30、"
+    "ATK_WIND/ACT/REC/CD == 0.16/0.09/0.42/0.12（红线守恒，全部读真实值）",
+    _asn_in_try_dash and _asn_in_init and _asn_line40 is not None
+    and _cond_land40
+    and (N.DASH_TIME, N.DASH_SPEED, N.DASH_INV, N.DASH_CD) == (0.20, 620.0, 0.26, 1.30)
+    and (N.ATK_WIND, N.ATK_ACT, N.ATK_REC, N.ATK_CD) == (0.16, 0.09, 0.42, 0.12),
+    f"try_dash内赋值={_asn_in_try_dash}(行:{_asn_line40}) init赋值={_asn_in_init} "
+    f"落地条件含from_air={_cond_land40} "
+    f"DASH=({N.DASH_TIME},{N.DASH_SPEED},{N.DASH_INV},{N.DASH_CD}) "
+    f"ATK=({N.ATK_WIND},{N.ATK_ACT},{N.ATK_REC},{N.ATK_CD})")
+
+# ---- ㉛-2 功能判据 · 地面起手不再被掐（修复本体）----
+_dx40, _tt40, _yt40, _l40 = _dash_phys_run(n=24)
+# 期望位移 = 620×0.2 = 124px。实测 124.0px：本夹具 _last 未被 start_night 重置
+#   ⇒ 全程 dt=1/120（首帧不走 0.016 兜底；若走则为 ~128.8px —— 两种情形阈值
+#   110 都过得去，断言对兜底不敏感）。
+# ⚠️ 计时器断言用 `<= 1e-9` 而非 `== 0.0`：`0.2 - 24×(1/120)` 在二进制浮点下
+#   是极小正数（~1e-16，探针场景③实测到）⇒ 精确相等会假红。
+#   1e-9 ≪ 一帧 1/120=0.0083 ⇒ 掩盖不了「计时器还在跑」的真失败（⛔ 非放水）。
+_cond2_40 = _tt40[4] > 0.05 and _dx40 >= 110.0 and _tt40[23] <= 1e-9
+chk("㉛-2 ⭐⭐⭐ PR40 功能判据：地面起手（y=FLOOR_Y, vy=0, on_ground=True）"
+    " 真 try_dash 后跑 24 帧（dt=1/120）⇒ 第 5 帧 dash_t>0.05（修复前第 1 帧"
+    " 即归零）、24 帧累计位移 ≥110px（期望 ~124，首帧 0.016 兜底 ⇒ ~129）、"
+    " 第 24 帧 dash_t==0（计时器到点，不是被落地判定提前掐）；"
+    " 且 24 帧 y 始终被钳在 FLOOR_Y（沿地板滑，钳位没删）",
+    _cond2_40 and all(_y == N.FLOOR_Y for _y in _yt40),
+    f"dx={_dx40:.1f}px 第5帧dash_t={_tt40[4]:.4f} 第24帧dash_t={_tt40[23]:.4f} "
+    f"y24帧全在FLOOR_Y={all(_y == N.FLOOR_Y for _y in _yt40)}")
+
+# ---- ㉛-3 阳性对照①：内存态 from_air=True ⇒ ㉛-2 的断言条件必须变红 ----
+# ⭐ 语义 = 修复前的行为（地面起手也被当成空中起手 ⇒ 第一帧落地即结束）。
+_dxB40, _ttB40, _ytB40, _lB40 = _dash_phys_run(n=24, from_air=True)
+_condB40 = _ttB40[4] > 0.05 and _dxB40 >= 110.0 and _ttB40[23] <= 1e-9
+chk("㉛-3 ⭐⭐ 阳性对照①：内存态把 `dash_from_air` 覆盖成 True（= 修复前"
+    "「地面起手也被落地判定掐断」）⇒ ㉛-2 的断言条件**确实变红**"
+    "（第 5 帧 dash_t==0、位移<20px）——证明 ㉛-2 抓的是这次修复，不是恒绿"
+    " （内存态覆盖，函数返回时已 finally 还原；退出码级证据见 `_pr40_probe.py`）",
+    (not _condB40) and _ttB40[4] == 0.0 and _dxB40 < 20.0,
+    f"from_air=True 时 dx={_dxB40:.1f}px 第5帧dash_t={_ttB40[4]:.4f} "
+    f"㉛-2条件为假={not _condB40}")
+
+# ---- ㉛-4 功能判据 · 空中起手语义不变（落地才结束，没被整个删掉）----
+_dxA40, _ttA40, _ytA40, _lA40 = _dash_phys_run(n=60, y0=N.FLOOR_Y - 30.0,
+                                                vy0=100.0, on_ground=False)
+_land_i = next((i for i, y in enumerate(_ytA40) if y >= N.FLOOR_Y), None)
+chk("㉛-4 ⭐⭐ PR40 功能判据：空中起手（y=FLOOR_Y-30, vy=+100, on_ground=False）"
+    " try_dash ⇒ snapshot 为空中起手；落到 FLOOR_Y 那一帧 dash_t==0 且 y==FLOOR_Y，"
+    " 且落地帧 ≤23（早于计时器 0.2s 到期 ⇒ 这个 0 是落地判定打的，不是计时器）"
+    " ——证明「落地即结束」没被整个删掉，只是加了 from_air 条件",
+    _lA40.dash_from_air is True and _land_i is not None and _land_i <= 23
+    and _ttA40[_land_i] == 0.0 and _ytA40[_land_i] == N.FLOOR_Y,
+    f"dash_from_air={_lA40.dash_from_air} 落地帧index={_land_i}(第{_land_i + 1}帧) "
+    f"该帧dash_t={_ttA40[_land_i] if _land_i is not None else None} "
+    f"y={_ytA40[_land_i] if _land_i is not None else None} 总位移={_dxA40:.1f}px")
+
+# ---- ㉛-5 阳性对照②：内存态 DASH_SPEED=310（砍半）⇒ 位移断言必须变红 ----
+_dxC40, _ttC40, _ytC40, _lC40 = _dash_phys_run(n=24, dash_speed=310.0)
+_condC40 = _ttC40[4] > 0.05 and _dxC40 >= 110.0 and _ttC40[23] <= 1e-9
+chk("㉛-5 ⭐⭐ 阳性对照②：内存态把 DASH_SPEED 砍半成 310.0 ⇒ ㉛-2 的位移断言"
+    " **确实变红**（~64px < 110）——证明 110px 阈值读的是真实常量行为，"
+    " 不是写死 124 的恒绿（finally 已还原 620.0 并核回）",
+    (not _condC40) and _dxC40 < 110.0 and N.DASH_SPEED == 620.0,
+    f"DASH_SPEED=310 时 dx={_dxC40:.1f}px ㉛-2条件为假={not _condC40} "
+    f"还原后 DASH_SPEED={N.DASH_SPEED}")
+
+# ---- ㉛-6 无孤儿标志：dash_from_air 写点=2 / 读点=1；dash_t 赋值点全列出 ----
+# ⚠️ 「读点」只数**代码行**（已剥 # 注释）——注释里提名字不算读。
+# ⚠️⚠️ 派单原文「dash_t 赋值点仅四处」与实测不符：漏了冲刺段每帧递减那行
+#   `self.dash_t = max(0.0, self.dash_t - dt)`（:1607 一带）。实测 **5 处**，
+#   按实测分类断言（init / 每帧递减 / 落地结束 / 撞墙结束 / try_dash 起手），
+#   ⛔ 不为了凑派单的「四」而漏数——回执已报备。
+_wr_fa = [(i + 1, ln.strip()) for i, ln in enumerate(_cl40)
+          if re.search(r"self\.dash_from_air\s*=", ln)]
+_rd_fa = [(i + 1, ln.strip()) for i, ln in enumerate(_cl40)
+          if "dash_from_air" in ln and not re.search(r"self\.dash_from_air\s*=", ln)]
+_asn_dt = [(i + 1, ln.strip()) for i, ln in enumerate(_cl40)
+           if re.search(r"self\.dash_t\s*=", ln)]
+chk("㉛-6 ⭐ PR40 无孤儿标志：`dash_from_air` 写点恰好 2 处（__init__ 默认 False "
+    "+ try_dash 起手 snapshot `not self.on_ground`）、读点恰好 1 处（落地判定条件）"
+    " ⇒ 不存在「只读不写」路径；`dash_t` 赋值点全列出且恰好 5 处"
+    "（init / 每帧递减 max(0,·-dt) / 落地结束 / 撞墙结束 / try_dash 起手）"
+    " ⇒ 本单没有新增「状态复位夹具之外」的东西",
+    len(_wr_fa) == 2 and len(_rd_fa) == 1 and len(_asn_dt) == 5
+    and any("= False" in ln for _, ln in _wr_fa)
+    and any("not self.on_ground" in ln for _, ln in _wr_fa)
+    and sum(1 for _, ln in _asn_dt if "max(0.0, self.dash_t - dt)" in ln) == 1
+    and sum(1 for _, ln in _asn_dt if ln.endswith("= 0.0")) == 3
+    and sum(1 for _, ln in _asn_dt if "= DASH_TIME" in ln) == 1,
+    f"dash_from_air 写点={_wr_fa} 读点={_rd_fa} dash_t 赋值点={_asn_dt}")
+
+# ---- ㉛-7 回归：本单改动没有碰坏 PR38 / PR35-v2 的接线（针对性复验）----
+# ⚠️ ⛔ 不写死「183/183」那种快照式总数断言（撞后续派单合法演进必红，
+#   ㉘-3 教训）；复验的是本单**可能碰坏的具体接线**。
+_l40r = w.luna
+_l40r.carrying = []
+_l40r.dash_t, _l40r.escort, _l40r.charging, _l40r.punch = 0.20, False, False, 0.0
+_l40r.atk_wind = _l40r.atk_act = _l40r.atk_rec = 0.0
+_pa40r = _l40r.pick_action()
+_l40r.dash_t = 0.0
+chk("㉛-7 ⭐ PR40 回归（针对性复验，⛔ 非快照式总数断言）：本单三处改动没有碰坏"
+    " PR38 接线（GAME_FPS['dash']==60.0、pick_action 空手冲刺仍返回 'dash'）"
+    " 与 PR35-v2 常量（attack/attack_charge==12.0、ATK 四段 0.16/0.09/0.42/0.12）；"
+    " 且至此 BAD==0（既有 183 条 + ㉛ 段前 6 条无一红，退出码由末尾真汇总裁决）",
+    N.GAME_FPS.get("dash") == 60.0 and _pa40r == "dash"
+    and (N.GAME_FPS.get("attack"), N.GAME_FPS.get("attack_charge")) == (12.0, 12.0)
+    and (N.ATK_WIND, N.ATK_ACT, N.ATK_REC, N.ATK_CD) == (0.16, 0.09, 0.42, 0.12)
+    and len(BAD) == 0,
+    f"pick_action(空手,dash_t>0)={_pa40r!r} OK={len(OK)} BAD={len(BAD)}")
+
+# ⭐ 边界结论（设计端 2026-10-16 裁决，⛔ 本场景不设判据）：
+#   当前几何下「平台边缘起手冲刺」**不可达** —— dash 期间有效重力 700，
+#   0.2s 只落 14px，而最近的非地板平台（餐桌顶 488）离地 182px
+#   ⇒ 落地发生在第 65 帧，dash_t 早已归零 ⇒ PR40 的「落地即结束」语义在此场景根本不参与。
+#   ⇒ 不构成风险，故⛔ 不写判据（写了会是恒真的假绿灯）。
+#   ⚠️ 若将来新增【离地 ≤14px】的矮平台，此场景重新可达 ⇒ 必须回来重验。
+#
+# ⭐⭐ 上面「不写」的**实测依据**（保留备查，这些数是我跑出来的不是推断）：
+#   场景：PLATFORMS[1] 餐桌 x430~700 / 顶面 488，起手 x=690（右缘内侧）、on_ground=True
+#        ⇒ try_dash 记 dash_from_air=False（地面起手），朝 +x 冲
+#        （DASH_SPEED=620 ⇒ 0.2s 位移 124px，10px 就出边缘，不存在冲不出）
+#   实测：dash 期间有效重力 = GRAVITY*0.35 = 700 ⇒ 0.2s 内只下落 0.5*700*0.2² = 14px
+#        平台顶离地板 = 670-488 = 182px
+#        ⇒ dash 结束（第 23 帧）时她仍在空中（y≈502），第 65 帧才落地
+#        ⇒ 落地时 dash_t 早已是 0 ⇒ 派单要的「落地下一帧 dash_t>0」恒为假
+#   阳性对照（内存态强制 dash_from_air=True 再跑同一场景）：
+#        真实态   落地帧=65  最终y=670.0  最终x=819.2
+#        阳性对照 落地帧=65  最终y=670.0  最终x=819.2   ← 三项全同，无可观测差异
+#   ⛔⛔ 为什么不写判据（设计端裁决，比"弱判据"更严重 —— 是**恒真**）：
+#      · 断言1「y 收敛 FLOOR_Y」被落地钳位（night.py:1619 `self.y, self.vy = FLOOR_Y, 0.0`）
+#        保证 ⇒ **任何**落地路径最终 y 都 == FLOOR_Y ⇒ 哪怕真穿地也绿 ⇒ 零判别力
+#        （我自己那次输出「最终y=670.0(FLOOR_Y=670)」就是证据：穿不穿地都这么打）
+#      · 断言3（dash_t 单调不增 / x 单调）由结构保证（dash_dir 起手快照、dash_t 每帧只减）
+#        且没有能变红的阳性对照
+#      ⇒ 三条合起来 = 永远绿 ⇒ 在总数里贡献一个**假绿**，比不写更糟
+#        （GP03 / GP04v2 栽过同一类：恒绿判据抓不到任何东西）
+
+print("=" * 72)
+print("㉛ PR40 段完成：本段 7 条（1 守护 + 2 功能 + 2 阳性对照 + 1 无孤儿标志"
+      " + 1 回归；⛔「平台边缘起手」经实测不可达，按设计端裁决不设判据，见上方注释）")
+print("=" * 72)
+
+# ============================================================================
 # ⭐⭐ 2026-10-14：本文件尾部（:1281 起）的各段排在 :1288 那条汇总**之后**、
 #   而且全文从来没有 sys.exit ⇒ **尾部判据跑红也不会让套件失败**（静默通过），
 #   `_自测_全部.py` 只看退出码 + 汇总行 ⇒ 永远看到 147/147✅。
-#   ⇒ 在**文件真正末尾**补一条真汇总 + 退出码，让尾部 ㉕/㉖/㉗/㉘ 段能被看见。
+#   ⇒ 在**文件真正末尾**补一条真汇总 + 退出码，让尾部 ㉕~㉛ 各段
+#     （PR31-D/PR36/PR39/PR37-v2/PR38/PR35-v2/PR40）能被看见。
 #   ⛔ 没有改动任何既有判据、⛔ 没有改任何阈值 —— 只是把 OK/BAD 如实报出去。
 # ============================================================================
 print("=" * 72)
 print(f"通过 {len(OK)} / {len(OK) + len(BAD)}"
-      f"   （含文件尾部 ㉕/㉖/㉗/㉘ 各段；:1288 那条只数到它之前）")
+      f"   （含文件尾部 ㉕/㉖/㉗/㉘/㉙/㉚/㉛ 各段；:1288 那条只数到它之前）")
 if BAD:
     print(f"❌ 未通过 {len(BAD)} 条：")
     for _bn in BAD:

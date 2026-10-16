@@ -333,6 +333,30 @@ def main():
         # ⛔ 把失败组的输出尾部落到文件，方便点开看（不看就等于没报）
         logdir = os.path.join(HERE, "_work", "_selftest_logs")
         os.makedirs(logdir, exist_ok=True)
+        # ⭐⭐⭐ 2026-10-16 根治：写本轮日志**之前**，先清掉根目录里的旧 .log。
+        #   病根：本文件只在**失败组**写日志（`for r in bad:`），通过的组不重写
+        #     ⇒ 一个组「曾经红过、后来修好了」，它那份旧的 `status=FAIL` 会
+        #       永远留在根目录 ⇒ 谁 ls 一眼看到满屏 FAIL，会以为项目很多自测是红的。
+        #        实测踩到过：28 份 .log 里只有 3 份是当天的真红，其余 25 份全是旧遗留。
+        #   ⛔⛔ **清空时机必须放在这里（所有组跑完之后）**，不能放在开头：
+        #      放开头的话，跑到一半中断 ⇒ 目录被清空、本轮又还没写
+        #      ⇒ 反而比"留着旧的"信息更少。放后面：跑完只剩本次真红；
+        #        跑中断了旧日志仍在（不会丢信息）。
+        #   ⛔ 只清 `.log`，且**不移走子目录** —— 归档目录（_archive_*）要留着。
+        _stale = 0
+        for _fn in os.listdir(logdir):
+            if not _fn.endswith(".log"):
+                continue
+            _fp = os.path.join(logdir, _fn)
+            if not os.path.isfile(_fp):
+                continue
+            try:
+                os.remove(_fp)
+                _stale += 1
+            except OSError:
+                pass          # ⛔ 删不掉就跳过，绝不让清理动作搞挂整轮自测
+        if _stale:
+            print("\n  🧹 已清除上一轮遗留的 %d 份日志（本轮只保留当前真红）" % _stale)
         for r in bad:
             p = os.path.join(logdir, r["name"].replace(".py", ".log"))
             with open(p, "w", encoding="utf-8") as f:

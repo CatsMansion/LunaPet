@@ -1270,7 +1270,8 @@ GAME_ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 #     不是数值没调好（详见 `_draw_luna` 里 attack 分支的注释）。
 #   ⛔ 原来那段「15fps 是为 8 个攻击姿态」的注释（PR15 前）已随 tease 一起失效，
 #     **已删除** —— 留着会误导下一个读代码的人去给桌宠动作调 fps。
-#   ⭐ attack / attack_charge 都是 12.0 = 16 帧 pingpong，0.667s 窗口内挥出再收回
+#   ⭐ attack / attack_charge 都是 12.0 = 16 帧 pingpong；0.667s 窗口内只走上升段 0→8
+#     （峰值索引 7~8；「收回」段落在窗口外 —— act 已切回 idle，⛔ 不存在「挥出再收回」）
 #     （PR35-v2：原 24.0 配取帧 `int(l.t * GAME_FPS)` = fps 乘两次 ⇒ 576 步/秒
 #      = 36 轮/秒频闪；修法 = fps 减半 + 取帧改 pingpong，与 run_carry :6380 同形态）。
 GAME_FPS = {"mw_walk": 12.0, "run_carry": 24.0,
@@ -1560,6 +1561,9 @@ class Luna:
         self.dash_i = 0.0      # ⭐ 无敌帧剩余（>0 时被抓判定失效）
         self.dash_cd = 0.0# 冷却
         self.dash_dir = 1      # 冲刺方向（快照，⛔ 不能读实时按键，冲刺中转向= 瞬移）
+        # ⭐⭐ PR40：本次冲刺是否【空中起手】的 snapshot（起手瞬间取，见 try_dash）。
+        #   ⇒ 落地即结束只判它：空中起手落地才结束；地面起手滑完 0.2s。
+        self.dash_from_air = False
         # ⭐⭐ 落地回调（2026-10-06 PR-06 接 `sfx_land` 用）。
         #   ⛔ Luna 自己**不import audio、不拿窗口对象**（同 `sneak_ok` 的纪律：
         #     物理层不依赖音频层，打包漏 QtMultimedia 时也照样能跑）。
@@ -1607,8 +1611,14 @@ class Luna:
             self.vy += GRAVITY * dt * 0.35     # ⭐ 冲刺中重力减半（滞空感）
             self.y += self.vy * dt
             if self.y >= FLOOR_Y:
+                # ⭐⭐ PR40：y/vy 钳位对【所有】起手生效 —— ⛔ 地面起手每帧也要钳回
+                #   地板，否则重力推着 y 越过 FLOOR_Y，0.2s 冲刺内陷下去 ~14.6px
+                #   （派单 §三 原话「否则会陷下去」；字面「只给 if 加条件」会把钳位
+                #   一起关掉 ⇒ 实测下沉 14.6px 后回弹，㉛-2 的 y 断言抓到，
+                #   已按派单文字要求改为「钳位无条件、结束有条件」，回执已报备）。
                 self.y, self.vy = FLOOR_Y, 0.0
-                self.dash_t = 0.0# 落地即结束（冲刺是地面技）
+                if self.dash_from_air:
+                    self.dash_t = 0.0# ⭐ PR40：落地即结束只对【空中起手】生效（地面起手滑完 0.2s，标志见 try_dash 的 dash_from_air）
             # 冲刺中不打伞：不能同时攻击
             if self.atk_wind > 0.0:
                 self.atk_wind = 0.0
@@ -1952,6 +1962,12 @@ class Luna:
             dir_in = self.face
         self.dash_dir = 1 if dir_in >= 0 else -1
         self.face = self.dash_dir
+        # ⭐⭐ PR40：起手瞬间 snapshot「是否空中起手」。
+        #   ⛔ 为什么必须在起手时取：冲刺中 vy 被重力推着走，起手后再看 on_ground
+        #      会把「地面起手」误判成「空中起手」⇒ 又被落地判定掐掉（PR38 §七 那个 bug）。
+        #   on_ground 由 update 物理段维护（:1661/1671/1703/1710/1733/1807/1843…），
+        #   keyPressEvent 调本函数时读到的是上一帧的值：站立=True / 空中=False，够用。
+        self.dash_from_air = not self.on_ground
         self.dash_t = DASH_TIME
         # ⭐ 无敌帧比位移窗口略长：出手即生效，落地仍有效
         self.dash_i = DASH_INV
