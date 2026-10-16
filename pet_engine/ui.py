@@ -7,13 +7,16 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QPoint
+from PySide6.QtCore import Qt, QTimer, QPoint, QStandardPaths, QLockFile
+# ⭐ QLocalServer / QLocalSocket 在 **QtNetwork** 里（⛔ 不在 QtCore，实测踩到）
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 # ⭐ 2026-10-03 修：平台板身的 `QLinearGradient` 从来没被导入 ——
 #   只要有地形（左右墙）就会进 paintEvent 的这条分支，每帧抛
 #   `NameError: name 'QLinearGradient' is not defined` → **平台画不出来**。
@@ -21,7 +24,10 @@ from PySide6.QtCore import Qt, QTimer, QPoint
 #      所以回归全绿但实机是坏的。⭐ 又一次：**回归全绿 ≠ 实机没问题**。
 from PySide6.QtGui import (QImage, QPixmap, QTransform, QPainter, QColor, QAction,
                            QIcon, QCursor, QPen, QLinearGradient, QBrush)
-from PySide6.QtWidgets import QApplication, QWidget, QSystemTrayIcon, QMenu
+from PySide6.QtWidgets import (QApplication, QWidget, QSystemTrayIcon, QMenu,
+                               QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                               QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
+                               QFrame, QSizePolicy)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core import Pet, PetPack, load_pack   # noqa: E402
@@ -160,6 +166,233 @@ class TerrainWindow(QWidget):
         p.setBrush(QColor(238, 214, 178, 210))
         p.drawRoundedRect(4, 3, w - 8, max(3, thick // 6), 4, 4)
         p.end()
+
+
+# ============================================================================
+# ⭐⭐ 2026-10-17 · SJ02 · 产品形态四件
+#   （4-2 首启引导 / 4-4 设置四项 / 4-5 单实例 / 4-7 去开发痕迹）
+#
+#   ⛔ 本段三条纪律（派单 §3 红线）：
+#   ① ⛔ 不动 core.py —— 物理/手感参数一律不碰（手感是 §3 阶段二的活）
+#   ② ⛔ 不自定数值 —— 设置项默认值按派单 §2 给的写
+#      （缩放 100 / 速度 1.0 / 透明度 100 / 开机自启默认关）
+#   ③ ⛔ 不硬编码路径 —— 一律走 Qt 标准目录（清单 §5-3）
+# ============================================================================
+
+# 4-7 的开发期开关名
+DEBUG_ENV = "LUNAPET_DEBUG"
+
+
+def _debug_on() -> bool:
+    """⭐ 只有 `LUNAPET_DEBUG=1` 才开开发期输出/菜单项。
+
+    ⛔ 必须**调用时**读 os.environ（不能 import 时缓存）——
+      自测 S-1 / S-2 正是靠切换这个 env 做双向阳性对照（默认无 / 开开关有）。
+    """
+    return os.environ.get(DEBUG_ENV) == "1"
+
+
+def _startup_banner(pack_name) -> None:
+    """4-7：启动横幅只在开发期输出。
+
+    ⛔ 是把 print **条件化**，不是把 print 删掉（删了 S-2 的阳性对照就抓不到）。
+    """
+    if _debug_on():
+        print(f"[引擎] 已启动：{pack_name}   （左键拖拽 / 托盘退出）")
+
+
+def _config_dir() -> str:
+    """⛔ 不许硬编码路径 ⇒ 走 Qt 标准配置目录（换机器/换用户都能跑）。"""
+    d = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
+    if not d:                      # 极端环境兜底：退回临时目录
+        d = QStandardPaths.writableLocation(QStandardPaths.TempLocation)
+    return os.path.join(d, "LunaPet")
+
+
+def _settings_path() -> str:
+    return os.path.join(_config_dir(), "settings.json")
+
+
+# ⭐ 默认值按派单 §2-4-4 给的那组（⏳ 待 Ronny 拍板，程序端不自己定）
+DEFAULT_SETTINGS = {"scale": 100, "speed": 1.0, "opacity": 100,
+                    "autostart": False, "guided": False}
+
+
+def load_settings() -> dict:
+    """读设置；文件不存在 / 损坏 ⇒ 回落默认值（⛔ 设置坏了也不能让桌宠起不来）。"""
+    out = dict(DEFAULT_SETTINGS)
+    p = _settings_path()
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                got = json.load(f)
+            if isinstance(got, dict):
+                out.update(got)
+        except Exception:
+            pass
+    return out
+
+
+def save_settings(d: dict) -> None:
+    p = _settings_path()
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        if _debug_on():                      # 失败也只在开发期说
+            print(f"[设置] 写盘失败：{e}")
+
+
+def _autostart_key():
+    """4-4 开机自启写在哪个键（回执要报备）。"""
+    return ("HKEY_CURRENT_USER",
+            r"Software\Microsoft\Windows\CurrentVersion\Run", "LunaPet")
+
+
+def set_autostart(on: bool, exe_path: str = "") -> bool:
+    """写 / 删开机自启。⛔ **只在用户勾选变化时**调用，绝不默认写。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        _, path, name = _autostart_key()
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0,
+                                winreg.KEY_SET_VALUE) as k:
+            if on:
+                winreg.SetValueEx(k, name, 0, winreg.REG_SZ,
+                                  exe_path or sys.executable)
+            else:
+                try:
+                    winreg.DeleteValue(k, name)
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception as e:
+        if _debug_on():
+            print(f"[自启] 写注册表失败：{e}")
+        return False
+
+
+class FirstRunGuide(QWidget):
+    """4-2 首次启动引导卡片。
+
+    ⛔ 三条硬要求：
+      ① **只出现一次** —— 标记写在设置文件里持久化（⛔ 不是写死跳过）
+      ② **不抢焦点** —— 用 `WindowDoesNotAcceptFocus`，比"不调 raise_()"更硬：
+         系统层面就不接受焦点，谁调 activateWindow() 也拿不到（4-6）
+      ③ 有明确关闭方式 —— 点一下即关 / 5 秒自动消失
+    """
+
+    AUTO_HIDE_MS = 5000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool
+                            | Qt.WindowDoesNotAcceptFocus
+                            | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowTitle("第一次见面")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        card = QFrame()
+        card.setObjectName("sj02card")
+        card.setStyleSheet(
+            "#sj02card{background:rgba(26,26,30,238);border-radius:12px;"
+            "border:1px solid rgba(255,255,255,70);}"
+            "QLabel{color:#f2f2f2;background:transparent;font-size:13px;}")
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 12, 16, 12)
+        cl.setSpacing(4)
+        h = QLabel("第一次见面，三件事：")
+        h.setStyleSheet("font-weight:600;")
+        cl.addWidget(h)
+        for line in ("· 左键按住我可以拖着走",
+                     "· 右键我、或点托盘图标，都有菜单",
+                     "· 工具箱贴在屏幕左边缘"):
+            cl.addWidget(QLabel(line))
+        tip = QLabel("（点一下关掉，5 秒后也会自己消失）")
+        tip.setStyleSheet("color:#a8a8b0;font-size:11px;")
+        cl.addWidget(tip)
+        lay.addWidget(card)
+        self.setFixedSize(card.sizeHint())
+        self._t = QTimer(self)
+        self._t.setSingleShot(True)
+        self._t.timeout.connect(self.close)
+        self._t.start(self.AUTO_HIDE_MS)
+
+    def mousePressEvent(self, e):
+        self._t.stop()
+        self.close()
+
+
+def maybe_first_run_guide(parent=None):
+    """4-2 入口：首次运行才建卡片，并立刻把标记落盘（返回卡片 或 None）。
+
+    ⛔ 返回 None 表示"这一次不该出现"——自测 S-3 就靠这个返回值判定。
+    """
+    st = load_settings()
+    if st.get("guided"):
+        return None
+    st["guided"] = True
+    save_settings(st)
+    g = FirstRunGuide(parent)
+    return g
+
+
+class SettingsDialog(QDialog):
+    """4-4 设置四项：缩放 / 速度 / 透明度 / 开机自启。
+
+    ⛔ 默认值与区间按派单 §2 给的写；⛔ 区间冲突我不自己改，写进回执报你。
+    """
+
+    def __init__(self, parent=None, cur=None):
+        super().__init__(parent)
+        cur = dict(DEFAULT_SETTINGS) if cur is None else dict(cur)
+        self.setWindowTitle("设置")
+        self.setModal(True)
+        v = QVBoxLayout(self)
+        self.sp_scale = QSpinBox()
+        self.sp_scale.setRange(50, 160)
+        self.sp_scale.setSuffix(" %")
+        self.sp_speed = QDoubleSpinBox()
+        self.sp_speed.setRange(0.5, 2.0)
+        self.sp_speed.setSingleStep(0.1)
+        self.sp_speed.setDecimals(1)
+        self.sp_opacity = QSpinBox()
+        self.sp_opacity.setRange(20, 100)
+        self.sp_opacity.setSuffix(" %")
+        self.ck_auto = QCheckBox("开机自启")
+        self.sp_scale.setValue(int(cur.get("scale", 100)))
+        self.sp_speed.setValue(float(cur.get("speed", 1.0)))
+        self.sp_opacity.setValue(int(cur.get("opacity", 100)))
+        self.ck_auto.setChecked(bool(cur.get("autostart", False)))
+        for label, w in (("缩放", self.sp_scale), ("速度", self.sp_speed),
+                         ("透明度", self.sp_opacity)):
+            row = QHBoxLayout()
+            lb = QLabel(label)
+            lb.setMinimumWidth(60)
+            row.addWidget(lb)
+            row.addWidget(w)
+            row.addStretch(1)
+            v.addLayout(row)
+        v.addWidget(self.ck_auto)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        b_ok = QPushButton("确定")
+        b_cancel = QPushButton("取消")
+        b_ok.clicked.connect(self.accept)
+        b_cancel.clicked.connect(self.reject)
+        btns.addWidget(b_ok)
+        btns.addWidget(b_cancel)
+        v.addLayout(btns)
+
+    def values(self) -> dict:
+        return {"scale": int(self.sp_scale.value()),
+                "speed": float(self.sp_speed.value()),
+                "opacity": int(self.sp_opacity.value()),
+                "autostart": bool(self.ck_auto.isChecked()),
+                "guided": True}
 
 
 class PetWindow(QWidget):
@@ -1252,6 +1485,34 @@ class PetWindow(QWidget):
             32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         return QIcon(pm)
 
+    # ================= SJ02 4-4 · 设置 =================
+    def _open_settings(self):
+        """打开设置界面；确定后落盘并立即应用（⛔ 开机自启只在勾选变化时才写注册表）。"""
+        old = load_settings()
+        dlg = SettingsDialog(None, old)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        vals = dlg.values()
+        save_settings(vals)
+        self._apply_settings(vals, old)
+
+    def _apply_settings(self, vals: dict, old: dict):
+        """应用设置：能生效的立刻生效，动不了的只落盘并如实标注。"""
+        # 透明度：直接生效
+        self.setWindowOpacity(max(0.2, min(1.0, vals["opacity"] / 100.0)))
+        # 缩放：ui 层就有 user_scale（⛔ 不需要碰 core.py）
+        #   ⚠️ 既有 clamp 是 0.45~1.60（见 apply_scale）⇒ 本设置面板给 50~160%
+        new_scale = max(0.45, min(1.60, vals["scale"] / 100.0))
+        if abs(new_scale - self.user_scale) > 1e-3:
+            self.user_scale = new_scale
+            self._sync_action_geometry(force=True)
+            self._apply_pos()
+            self.update()
+        # ⛔ 速度：core.py 是物理/手感参数，SJ02 红线 1 不许动
+        #   ⇒ 本单只落盘，不接到行为上（手感是清单 §3 阶段二的活）。见回执 ⏳。
+        if vals.get("autostart") != old.get("autostart"):
+            set_autostart(vals["autostart"], sys.executable)
+
     def _make_tray(self):
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(self._tray_icon())
@@ -1261,23 +1522,88 @@ class PetWindow(QWidget):
         a_quit = QAction("退出", self)
         a_quit.triggered.connect(QApplication.quit)
         m.addAction(a_toggle)
-        a_reload = QAction("⭐ 重新加载素材（不用重启）", self)
-        a_reload.triggered.connect(self.reload_pack)
-        m.addAction(a_reload)
-        a_tuner = QAction("⭐ 手感调试面板", self)
-        a_tuner.triggered.connect(self.open_tuner_once)
-        m.addAction(a_tuner)
+        # ⭐⭐ SJ02 4-7：这两个开发期入口**只在 LUNAPET_DEBUG=1 时**出现
+        #   ⛔ 是条件显示，⛔ 不是删功能（Ronny 自己验收还要用调试面板）
+        if _debug_on():
+            a_reload = QAction("⭐ 重新加载素材（不用重启）", self)
+            a_reload.triggered.connect(self.reload_pack)
+            m.addAction(a_reload)
+            a_tuner = QAction("⭐ 手感调试面板", self)
+            a_tuner.triggered.connect(self.open_tuner_once)
+            m.addAction(a_tuner)
+        # ⭐⭐ SJ02 4-4：「设置…」插在分隔符**之前**
+        #   ⛔「显示 / 隐藏」与「退出」的相对顺序不变、分隔符与 tray.show() 不动
+        a_set = QAction("设置…", self)
+        a_set.triggered.connect(self._open_settings)
+        m.addAction(a_set)
         m.addSeparator()
         m.addAction(a_quit)
         self.tray.setContextMenu(m)
         self.tray.show()
 
 
+# ================= SJ02 4-5 · 单实例 =================
+# ⭐ 选型理由（回执要报）：
+#   QLocalServer 单用有**名字竞态**（两个进程同时 listen 会互相抢）；
+#   QLockFile 单用则拿不到"已有实例"去喊它（派单要求「激活已有实例后自己退出」）。
+#   ⇒ 组合：QLockFile 做**权威仲裁**（原子、还能判陈旧锁）+ QLocalSocket 做**激活喊话**。
+#   ⛔ 路径全走 Qt 标准临时目录（清单 §5-3：不许硬编码）
+SINGLE_SERVER_NAME = "LunaPet_SingleInstance_v1"
+
+
+def _single_lock_path() -> str:
+    d = QStandardPaths.writableLocation(QStandardPaths.TempLocation)
+    return os.path.join(d, "LunaPet_single.lock")
+
+
+def _acquire_single_instance():
+    """返回 (lock, server) = 我是第一个实例；返回 None = 已有实例在跑。
+
+    ⛔ 拿不到锁就返回 None：绝不抛、绝不弹框（4-6 的要求）。
+    """
+    lock = QLockFile(_single_lock_path())
+    lock.setStaleLockTime(30 * 1000)       # 30s 后按陈旧锁处理（崩过也能重启）
+    if not lock.tryLock(0):
+        return None
+    srv = QLocalServer()
+    QLocalServer.removeServer(SINGLE_SERVER_NAME)
+    srv.listen(SINGLE_SERVER_NAME)
+    return lock, srv
+
+
+def _notify_existing_instance() -> bool:
+    """给已跑起来的实例喊一声「该你露面了」；喊不到也安静返回（⛔ 不弹框）。"""
+    try:
+        sock = QLocalSocket()
+        sock.connectToServer(SINGLE_SERVER_NAME)
+        if not sock.waitForConnected(300):
+            return False
+        sock.write(b"show")
+        sock.flush()
+        sock.waitForBytesWritten(300)
+        sock.disconnectFromServer()
+        return True
+    except Exception:
+        return False
+
+
 def run(pack_dir: str, tuner: bool = False):
     app = QApplication(sys.argv)
+    # ⭐⭐ SJ02 4-5：已有实例在跑 ⇒ 喊它露面，自己退出（不崩、不叠第二个窗口）
+    _si = _acquire_single_instance()
+    if _si is None:
+        _notify_existing_instance()
+        return 0
+    _lock, _server = _si
     pack = load_pack(pack_dir)
     w = PetWindow(pack)
     w.show()
+    # ⭐⭐ SJ02 4-2 首启引导：只出现一次、不抢焦点、点一下或 5 秒自灭
+    _guide = maybe_first_run_guide(w)
+    if _guide is not None:
+        _guide.move(w.x() + w.width() + 12, w.y() + 16)
+        _guide.show()
+        w._guide = _guide                  # 挂住引用，防被 GC
     # ⭐⭐ 2026-09-29 生活容器工具栏（P0）：柜子贴屏幕左边缘，拉开抽屉取道具
     try:
         from ui_toolbar import ToolBar
@@ -1285,10 +1611,22 @@ def run(pack_dir: str, tuner: bool = False):
         bar.show()
         w._toolbar = bar            # 挂住引用，防被 GC
     except Exception as e:
-        print(f"[工具栏] 未启用：{e}")
+        if _debug_on():             # ⛔ SJ02 4-7：连失败信息也是开发期输出
+            print(f"[工具栏] 未启用：{e}")
     if tuner:
         from console import open_tuner      # ⭐ 调试台（⛔ 成品默认不开）
         tw = open_tuner(w)
         tw.setWindowTitle(f"手感调试台 — {pack.name}")
-    print(f"[引擎] 已启动：{pack.name}   （左键拖拽 / 托盘退出）")
+    _startup_banner(pack.name)
+    # ⭐⭐ SJ02 4-5：被第二个实例喊到 ⇒ 露面（这是「激活已有实例」的正路，
+    #   ⛔ 与 4-2 引导卡片那条"不抢焦点"不冲突：那是首启提示，这是用户主动再启动）
+    def _on_activate():
+        while _server.hasPendingConnections():
+            _s = _server.nextPendingConnection()
+            _s.readyRead.connect(_s.readAll)     # 读了就丢，防堆积
+        w.show()
+        w.raise_()
+
+    _server.newConnection.connect(_on_activate)
+    w._single_lock, w._single_server = _lock, _server   # 挂住引用，防被 GC
     return app.exec()
